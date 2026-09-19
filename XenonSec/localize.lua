@@ -1,21 +1,3 @@
---------------------------------------------------------------------
--- XenonSec :: localize.lua
--- Finds every identifier that resolves to a genuine global (never
--- shadowed by a local anywhere in its scope) and, IF it is never used
--- as an assignment target while global, prepends a synthetic
---   local <name> = <name>
--- to the top of the chunk. The one-time RHS read still goes through
--- the real global lookup; every other use of that name throughout the
--- file becomes an ordinary local access once renamer.lua runs after
--- this pass -- fewer scope-chain walks/_G lookups at runtime, and one
--- less "this text is obviously a stdlib call" signal in the bytecode.
---
--- Deliberately conservative: a name that is EVER assigned while it
--- resolves to global (`print = myLogger`) is excluded entirely, since
--- localizing it would silently stop that assignment from affecting
--- the real global -- a real behaviour change we must never risk.
---------------------------------------------------------------------
-
 local Localize = {}
 
 local function pushFrame(stack) stack[#stack + 1] = {}; return stack[#stack] end
@@ -41,7 +23,6 @@ function walkExpr(node, stack, reads, writes)
   local kind = node.kind
   if kind == "Number" or kind == "String" or kind == "Nil" or kind == "True"
     or kind == "False" or kind == "Vararg" then
-    -- nothing
   elseif kind == "Name" then
     markRead(node.name, stack, reads)
   elseif kind == "Index" then
@@ -115,17 +96,14 @@ function walkStat(node, stack, reads, writes)
     walkBlockBare(node.body, stack, reads, writes)
     walkExpr(node.cond, stack, reads, writes)
     popFrame(stack)
-  elseif kind == "Break" then
-    -- nothing
-  elseif kind == "Continue" then
-    -- nothing (compiler.lua handles jump targets)
+  elseif kind == "Break" or kind == "Continue" then
   elseif kind == "NumericFor" then
     walkExpr(node.start, stack, reads, writes)
     walkExpr(node.limit, stack, reads, writes)
     if node.step then walkExpr(node.step, stack, reads, writes) end
     pushFrame(stack)
     declare(stack, node.var)
-    walkBlockScoped(node.body, stack, reads, writes)
+    walkBlockBare(node.body, stack, reads, writes)
     popFrame(stack)
   elseif kind == "GenericFor" then
     for _, e in ipairs(node.exprs) do walkExpr(e, stack, reads, writes) end
@@ -150,9 +128,6 @@ function walkBlockScoped(block, stack, reads, writes)
   popFrame(stack)
 end
 
--- Public entry point. Mutates and returns the same AST: prepends one
--- `local name = name` per qualifying global, in a stable (sorted)
--- order, to the very front of the top-level block.
 function Localize.apply(ast)
   local stack = {}
   pushFrame(stack)

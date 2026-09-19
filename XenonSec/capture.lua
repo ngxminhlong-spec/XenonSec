@@ -1,19 +1,3 @@
---------------------------------------------------------------------
--- XenonSec :: capture.lua
--- Runs AFTER renamer.lua (so every local binding already has a
--- globally-unique token). Determines which bindings are ever read or
--- written from INSIDE a nested Function literal relative to where
--- they were declared -- i.e. which locals are true closure upvalues.
---
--- Those must keep using the existing scope-chain/cell mechanism
--- (proven correct, untouched). Everything else is safe to allocate as
--- a flat per-call register slot: nothing can ever observe whether a
--- register slot was "the same slot reused" vs "a fresh binding", since
--- the only way to observe that distinction is through a closure that
--- outlives the current activation -- and by definition, nothing here
--- does.
---------------------------------------------------------------------
-
 local Capture = {}
 
 local function pushFrame(stack, funcDepth)
@@ -23,8 +7,6 @@ end
 local function popFrame(stack) stack[#stack] = nil end
 local function declare(stack, name) stack[#stack].names[name] = true end
 
--- Looks up `name`; if found in a frame belonging to a shallower
--- function-depth than `currentFuncDepth`, marks it captured.
 local function resolveAndMark(stack, name, currentFuncDepth, captured)
   for i = #stack, 1, -1 do
     local frame = stack[i]
@@ -35,7 +17,6 @@ local function resolveAndMark(stack, name, currentFuncDepth, captured)
       return
     end
   end
-  -- not found => genuine global, nothing to do
 end
 
 local walkExpr, walkStat, walkBlockBare, walkBlockScoped, walkFunction
@@ -44,7 +25,7 @@ function walkExpr(node, stack, depth, captured)
   local kind = node.kind
   if kind == "Number" or kind == "String" or kind == "Nil" or kind == "True"
     or kind == "False" or kind == "Vararg" then
-    -- nothing
+    -- Nothing
   elseif kind == "Name" then
     resolveAndMark(stack, node.name, depth, captured)
   elseif kind == "Index" then
@@ -77,7 +58,7 @@ end
 
 function walkFunction(node, stack, depth, captured)
   local newDepth = depth + 1
-  local frame = pushFrame(stack, newDepth)
+  pushFrame(stack, newDepth)
   for _, p in ipairs(node.params) do declare(stack, p) end
   walkBlockBare(node.body, stack, newDepth, captured)
   popFrame(stack)
@@ -89,6 +70,7 @@ function walkStat(node, stack, depth, captured)
     for _, v in ipairs(node.values) do walkExpr(v, stack, depth, captured) end
     for _, n in ipairs(node.names) do declare(stack, n) end
   elseif kind == "LocalFunction" then
+    -- Declare FIRST so recursive calls inside func can resolve correctly
     declare(stack, node.name)
     walkExpr(node.func, stack, depth, captured)
   elseif kind == "Assign" then
@@ -119,17 +101,13 @@ function walkStat(node, stack, depth, captured)
     walkBlockBare(node.body, stack, depth, captured)
     walkExpr(node.cond, stack, depth, captured)
     popFrame(stack)
-  elseif kind == "Break" then
-    -- nothing
-  elseif kind == "Continue" then
-    -- nothing (compiler.lua handles jump targets)
   elseif kind == "NumericFor" then
     walkExpr(node.start, stack, depth, captured)
     walkExpr(node.limit, stack, depth, captured)
     if node.step then walkExpr(node.step, stack, depth, captured) end
     pushFrame(stack, depth)
     declare(stack, node.var)
-    walkBlockScoped(node.body, stack, depth, captured)
+    walkBlockBare(node.body, stack, depth, captured) -- Dùng Bare thay vì Scoped để tránh lặp Frame
     popFrame(stack)
   elseif kind == "GenericFor" then
     for _, e in ipairs(node.exprs) do walkExpr(e, stack, depth, captured) end
@@ -139,8 +117,6 @@ function walkStat(node, stack, depth, captured)
     popFrame(stack)
   elseif kind == "Return" then
     for _, a in ipairs(node.args) do walkExpr(a, stack, depth, captured) end
-  else
-    error("XenonSec capture: unknown statement kind '" .. tostring(kind) .. "'")
   end
 end
 
@@ -154,12 +130,10 @@ function walkBlockScoped(block, stack, depth, captured)
   popFrame(stack)
 end
 
--- Public entry point. Returns a set: { [token] = true } for every
--- local binding token that is captured by some nested closure.
 function Capture.analyze(ast)
   local stack = {}
   local captured = {}
-  pushFrame(stack, 1) -- main chunk is function-depth 1
+  pushFrame(stack, 1)
   walkBlockBare(ast, stack, 1, captured)
   popFrame(stack)
   return captured

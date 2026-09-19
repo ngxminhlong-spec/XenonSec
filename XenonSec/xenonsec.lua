@@ -26,7 +26,7 @@ Options:
                    profilers/IDEs, so it's off by default)
   --luau           Parse input as Luau (compound ops, continue, type
                    annotations, if-expressions, // floor division)
-  --junk <0..1>    Junk-instruction injection rate (default 0.12, 0 disables)
+  --junk <0..1>    Junk-instruction rate (default 0.12, 0 disables)
   --decoys <n>     Number of decoy constants to inject (default: randomized)
   -h               Show this help
 

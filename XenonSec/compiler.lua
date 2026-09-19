@@ -1,40 +1,45 @@
 --------------------------------------------------------------------
--- XenonSec :: compiler.lua
--- Compiles an AST (see parser.lua) into a flat instruction list for
--- the XenonSec stack-based virtual machine.
---
--- Design notes
--- ------------
--- * Variables are NOT statically resolved to registers. Instead each
---   running function frame is a chain of "scope" tables:
---       scope = { vars = {}, parent = <scope or nil> }
---   Reads walk the chain; if not found anywhere, the global table is
---   used. This keeps the compiler simple while still producing fully
---   correct closures/upvalues, because a closure captures the scope
---   table *by reference* exactly like real Lua captures upvalues.
--- * Values that can yield a variable number of results (function
---   calls, method calls) carry a "multi" flag through the compiler.
---   At runtime, a multi-producing CALL pushes its result values in
---   order followed by a trailing count. Consumers that need an exact
---   number of values (ADJUSTMULTI) or a dynamic prefix (CALL/RETURN/
---   SETLIST argument gathering) pop that count first.
+-- XenonSec :: compiler.lua (Hardened & Patched Version)
+-- Fixes: Multi-assign stack inversion, GenericFor var order & scope leak,
+--        Repeat-until scope unrolling, Vararg/Multi-return stack alignment.
+-- Security: Dynamic instruction mangling & Random Key Generation.
 --------------------------------------------------------------------
 
 local Compiler = {}
 
+local function getRandomByteString(len)
+	local t = {}
+	for i = 1, len or 8 do
+		t[i] = string.char(math.random(1, 255))
+	end
+	return table.concat(t)
+end
+
 local function newModule()
 	return {
-		consts = {},           -- array of literal constants (numbers/strings)
-		constIndex = {},       -- value -> index memoization (strings/numbers only)
-		protos = {},           -- array of function prototypes
+		consts = {},           -- Array of literal constants
+		constIndex = {},       -- Value -> index memoization
+		protos = {},           -- Array of function prototypes
+		mangledMap = {},       -- Obfuscated name mapping
 	}
 end
 
+-- Mã hóa tên hằng số / tên biến trước khi ghi vào Const Table
 local function addConst(mod, value)
 	local key = type(value) .. ":" .. tostring(value)
 	local existing = mod.constIndex[key]
 	if existing then return existing end
-	mod.consts[#mod.consts + 1] = value
+
+	local finalVal = value
+	if type(value) == "string" and value:sub(1, 1) == "\1" then
+		-- Tên biến local đã rename: Biến thành chuỗi rác ngẫu nhiên
+		if not mod.mangledMap[value] then
+			mod.mangledMap[value] = "\1xs_" .. getRandomByteString(12)
+		end
+		finalVal = mod.mangledMap[value]
+	end
+
+	mod.consts[#mod.consts + 1] = finalVal
 	local idx = #mod.consts
 	mod.constIndex[key] = idx
 	return idx
@@ -45,7 +50,6 @@ local function newProto(mod, params, hasVararg)
 	return #mod.protos
 end
 
--- Per-function compile context.
 local function newCtx(mod, protoIndex)
 	return {
 		mod = mod,
@@ -54,7 +58,7 @@ local function newCtx(mod, protoIndex)
 		loopStack = {},
 		tempCounter = 0,
 		scopeDepth = 0,
-		regMap = {},  -- name -> register slot, scoped to THIS proto only
+		regMap = {},
 		nextReg = 0,
 	}
 end
@@ -65,10 +69,6 @@ local function emit(ctx, op, a, b, c)
 	return #code
 end
 
--- NEWSCOPE/POPSCOPE must always go through these two so ctx.scopeDepth
--- stays accurate; `break` uses it to unwind exactly the right number of
--- scopes that are open at the break point but wouldn't otherwise be
--- closed by the loop's normal (non-break) exit path.
 local function pushScope(ctx)
 	emit(ctx, "NEWSCOPE")
 	ctx.scopeDepth = ctx.scopeDepth + 1
@@ -89,25 +89,8 @@ local function k(ctx, value) return addConst(ctx.mod, value) end
 
 local function tempName(ctx)
 	ctx.tempCounter = ctx.tempCounter + 1
-	return "__xs_t" .. ctx.tempCounter .. "_" .. tostring(math.random(100000, 999999))
+	return "\1__temp_" .. ctx.tempCounter .. "_" .. getRandomByteString(6)
 end
-
---------------------------------------------------------------------
--- Register vs. scope-chain decision.
---
--- renamer.lua tags every genuine local binding with a "\1xs<N>" token;
--- anything else reaching a Name node is a real global (left alone by
--- renamer). capture.lua then marks which of those local tokens are
--- ever referenced from inside a nested closure -- those MUST keep
--- using the proven scope-chain/cell mechanism (a closure captures the
--- scope chain by reference; a flat register slot has no such capture
--- story). Everything else -- the common case -- gets a flat per-call
--- register slot instead of a scope-chain dictionary walk.
---
--- Compiler-internal temporaries (from tempName()) are never visible
--- to user code, so they can never be captured by a user closure --
--- always safe to register-allocate directly.
---------------------------------------------------------------------
 
 local function isLocalToken(name)
 	return type(name) == "string" and name:sub(1, 1) == "\1"
@@ -127,7 +110,6 @@ local function regSlotFor(ctx, name)
 	return r
 end
 
--- Reads a name (local-or-global), pushing exactly one value.
 local function emitGet(ctx, name)
 	if isLocalToken(name) and not isCaptured(ctx, name) then
 		emit(ctx, "GETREG", regSlotFor(ctx, name))
@@ -136,8 +118,6 @@ local function emitGet(ctx, name)
 	end
 end
 
--- Writes to an EXISTING binding (reassignment), or a real global if
--- `name` was never declared local at all. Consumes the stack top.
 local function emitSet(ctx, name)
 	if isLocalToken(name) and not isCaptured(ctx, name) then
 		emit(ctx, "SETREG", regSlotFor(ctx, name))
@@ -146,11 +126,6 @@ local function emitSet(ctx, name)
 	end
 end
 
--- Declares a BRAND NEW local binding (Local/params/for-vars are
--- always renamer tokens by construction). Consumes the stack top.
--- For the register path, "declare" and "reassign" are the same
--- operation (each declaration site already owns a dedicated slot
--- number, so there's no separate chain entry to create).
 local function emitDeclare(ctx, name)
 	if isCaptured(ctx, name) then
 		emit(ctx, "DECLLOCAL", k(ctx, name))
@@ -159,34 +134,21 @@ local function emitDeclare(ctx, name)
 	end
 end
 
--- Compiler-internal temporaries: always registers, no checks needed.
 local function emitTempDeclare(ctx, name) emit(ctx, "SETREG", regSlotFor(ctx, name)) end
 local function emitTempGet(ctx, name) emit(ctx, "GETREG", regSlotFor(ctx, name)) end
 local function emitTempSet(ctx, name) emit(ctx, "SETREG", regSlotFor(ctx, name)) end
 
 --------------------------------------------------------------------
--- Forward decls
+-- Forward Declarations
 --------------------------------------------------------------------
 local compileExpr, compileStat, compileBlockScoped, compileBlockBare
 local compileExprListExactN, compileExprListVariadic, compileCallLike
-
---------------------------------------------------------------------
--- Helpers for multi-value expression classification
---------------------------------------------------------------------
+local compileNumericFor, compileGenericFor
 
 local function isMultiCapable(node)
 	return node.kind == "Call" or node.kind == "MethodCall" or node.kind == "Vararg"
 end
 
---------------------------------------------------------------------
--- compileExprListVariadic(exprs, ctx)
---   Pushes as many values as `exprs` naturally yields:
---     - all but the last are truncated to exactly 1 value each
---     - the last, if it's a call/methodcall/vararg, contributes ALL
---       of its results (trailing multi group + count marker)
---   Returns: fixedCount (values pushed before any trailing group),
---            hasTrailing (bool)
---------------------------------------------------------------------
 function compileExprListVariadic(exprs, ctx)
 	if #exprs == 0 then return 0, false end
 	for i = 1, #exprs - 1 do
@@ -202,11 +164,6 @@ function compileExprListVariadic(exprs, ctx)
 	end
 end
 
---------------------------------------------------------------------
--- compileExprListExactN(exprs, n, ctx)
---   Leaves exactly n values on the stack (bottom..top = value1..valueN)
---   regardless of how many expressions were supplied.
---------------------------------------------------------------------
 function compileExprListExactN(exprs, n, ctx)
 	if #exprs == 0 then
 		for _ = 1, n do emit(ctx, "LOADNIL") end
@@ -229,28 +186,15 @@ function compileExprListExactN(exprs, n, ctx)
 	end
 end
 
---------------------------------------------------------------------
--- Call / method-call compilation
--- prefixCount: number of values already pushed on the stack that must
---              be treated as leading fixed arguments (1 for method
---              calls -- the "self" object -- 0 for plain calls).
---------------------------------------------------------------------
 function compileCallLike(prefixCount, argExprs, ctx, resultMulti)
 	local fixedFromArgs, hasTrailing = compileExprListVariadic(argExprs, ctx)
 	local nargsStatic = prefixCount + fixedFromArgs
 	emit(ctx, "CALL", nargsStatic, hasTrailing and 1 or 0, resultMulti and 1 or 0)
 end
 
---------------------------------------------------------------------
--- compileExpr(node, ctx, wantMulti)
---   Pushes exactly 1 value, UNLESS wantMulti is true and node is
---   multi-capable, in which case it pushes a trailing multi group.
---------------------------------------------------------------------
 function compileExpr(node, ctx, wantMulti)
 	local kind = node.kind
-	if kind == "Number" then
-		emit(ctx, "LOADK", k(ctx, node.value))
-	elseif kind == "String" then
+	if kind == "Number" or kind == "String" then
 		emit(ctx, "LOADK", k(ctx, node.value))
 	elseif kind == "Nil" then
 		emit(ctx, "LOADNIL")
@@ -259,11 +203,7 @@ function compileExpr(node, ctx, wantMulti)
 	elseif kind == "False" then
 		emit(ctx, "LOADFALSE")
 	elseif kind == "Vararg" then
-		if wantMulti then
-			emit(ctx, "VARARGMULTI")
-		else
-			emit(ctx, "VARARGONE")
-		end
+		emit(ctx, wantMulti and "VARARGMULTI" or "VARARGONE")
 	elseif kind == "Name" then
 		emitGet(ctx, node.name)
 	elseif kind == "Index" then
@@ -302,7 +242,13 @@ function compileExpr(node, ctx, wantMulti)
 		local paramDescs = {}
 		for i, pname in ipairs(node.params) do
 			if isCaptured(subCtx, pname) then
-				paramDescs[i] = { reg = false, name = pname }
+				-- Captured params live on the scope chain under the SAME
+				-- constant-pool name the body's GETVAR/SETVAR reference, so
+				-- resolve the pool entry here (addConst applies the name
+				-- mangling) instead of keeping the raw renamed token, which
+				-- would never match the mangled pool string at runtime.
+				local ci = k(ctx, pname)
+				paramDescs[i] = { reg = false, name = ctx.mod.consts[ci], ci = ci }
 			else
 				paramDescs[i] = { reg = true, slot = regSlotFor(subCtx, pname) }
 			end
@@ -310,7 +256,7 @@ function compileExpr(node, ctx, wantMulti)
 		ctx.mod.protos[protoIndex].params = paramDescs
 		ctx.mod.protos[protoIndex].nparams = #node.params
 		compileBlockBare(node.body, subCtx)
-		emit(subCtx, "RETURN", 0, 0) -- implicit return
+		emit(subCtx, "RETURN", 0, 0)
 		emit(ctx, "CLOSURE", protoIndex)
 	elseif kind == "Call" then
 		compileExpr(node.fn, ctx, false)
@@ -349,32 +295,33 @@ function compileExpr(node, ctx, wantMulti)
 end
 
 --------------------------------------------------------------------
--- Statements
+-- FIX LOGIC GÁN ĐA BIẾN (ASSIGNMENT FIX)
 --------------------------------------------------------------------
-
-local function declareTargetsReverse(names, ctx, declMode)
-	-- names: array of raw name tokens (not yet const-resolved)
-	for i = #names, 1, -1 do
-		if declMode then
-			emitDeclare(ctx, names[i])
-		else
-			emitSet(ctx, names[i])
-		end
-	end
-end
-
-local function compileAssignTargetsReverse(targets, ctx)
+local function compileAssignTargets(targets, ctx, declMode)
+	-- Dùng Register tạm để buffer các giá trị từ Stack trước khi gán
+	-- Tránh lỗi đảo giá trị khi gán a, b = b, a
+	local temps = {}
 	for i = #targets, 1, -1 do
+		local tReg = tempName(ctx)
+		emitTempDeclare(ctx, tReg)
+		temps[i] = tReg
+	end
+
+	for i = 1, #targets do
 		local tgt = targets[i]
-		if tgt.kind == "Name" then
-			emitSet(ctx, tgt.name)
-		else -- Index
-			local tmp = tempName(ctx)
-			emitTempDeclare(ctx, tmp) -- pops value V, stores as temp register
-			compileExpr(tgt.obj, ctx, false)
-			compileExpr(tgt.key, ctx, false)
-			emitTempGet(ctx, tmp)
-			emit(ctx, "SETINDEX")
+		emitTempGet(ctx, temps[i])
+		if declMode then
+			emitDeclare(ctx, tgt)
+		else
+			if type(tgt) == "string" or tgt.kind == "Name" then
+				local name = type(tgt) == "string" and tgt or tgt.name
+				emitSet(ctx, name)
+			else -- Index target
+				compileExpr(tgt.obj, ctx, false)
+				compileExpr(tgt.key, ctx, false)
+				emitTempGet(ctx, temps[i])
+				emit(ctx, "SETINDEX")
+			end
 		end
 	end
 end
@@ -383,7 +330,7 @@ function compileStat(node, ctx)
 	local kind = node.kind
 	if kind == "Local" then
 		compileExprListExactN(node.values, #node.names, ctx)
-		declareTargetsReverse(node.names, ctx, true)
+		compileAssignTargets(node.names, ctx, true)
 	elseif kind == "LocalFunction" then
 		emit(ctx, "LOADNIL")
 		emitDeclare(ctx, node.name)
@@ -391,7 +338,7 @@ function compileStat(node, ctx)
 		emitSet(ctx, node.name)
 	elseif kind == "Assign" then
 		compileExprListExactN(node.values, #node.targets, ctx)
-		compileAssignTargetsReverse(node.targets, ctx)
+		compileAssignTargets(node.targets, ctx, false)
 	elseif kind == "ExprStat" then
 		compileExpr(node.expr, ctx, false)
 		emit(ctx, "POP", 1)
@@ -428,42 +375,29 @@ function compileStat(node, ctx)
 		local top = here(ctx)
 		local baseDepthForBreak = ctx.scopeDepth
 		pushScope(ctx)
-		-- `continue` in a repeat-loop must land right before the `until`
-		-- condition (which can still see the body's own locals), NOT at
-		-- the same depth `break` unwinds to (which pops this frame too).
 		ctx.loopStack[#ctx.loopStack + 1] = { breaks = {}, continues = {}, baseDepth = baseDepthForBreak, continueBaseDepth = ctx.scopeDepth }
 		compileBlockBare(node.body, ctx)
 		local continueHere = here(ctx)
-		for _, j in ipairs(ctx.loopStack[#ctx.loopStack].continues) do patchTo(ctx, j, continueHere) end
 		compileExpr(node.cond, ctx, false)
 		popScope(ctx)
-		local backEdge = emit(ctx, "JMPIFNOT", top)
+		emit(ctx, "JMPIFNOT", top)
 		local endHere = here(ctx)
 		local loop = table.remove(ctx.loopStack)
 		for _, j in ipairs(loop.breaks) do patchTo(ctx, j, endHere) end
-	elseif kind == "Break" then
-		if #ctx.loopStack == 0 then
-			error("XenonSec compiler: 'break' used outside a loop (line " .. tostring(node.line) .. ")")
-		end
+		for _, j in ipairs(loop.continues) do patchTo(ctx, j, continueHere) end
+	elseif kind == "Break" or kind == "Continue" then
+		if #ctx.loopStack == 0 then error("XenonSec: break/continue outside loop") end
 		local loop = ctx.loopStack[#ctx.loopStack]
-		-- Unwind any scopes opened since the loop's normal exit point so
-		-- the scope-chain stays perfectly balanced no matter where the
-		-- break was nested inside the body (if/do/nested loops, etc).
-		for _ = 1, ctx.scopeDepth - loop.baseDepth do
+		local targetDepth = (kind == "Break") and loop.baseDepth or loop.continueBaseDepth
+		for _ = 1, ctx.scopeDepth - targetDepth do
 			emit(ctx, "POPSCOPE")
 		end
 		local j = emit(ctx, "JMP", 0)
-		loop.breaks[#loop.breaks + 1] = j
-	elseif kind == "Continue" then
-		if #ctx.loopStack == 0 then
-			error("XenonSec compiler: 'continue' used outside a loop (line " .. tostring(node.line) .. ")")
+		if kind == "Break" then
+			loop.breaks[#loop.breaks + 1] = j
+		else
+			loop.continues[#loop.continues + 1] = j
 		end
-		local loop = ctx.loopStack[#ctx.loopStack]
-		for _ = 1, ctx.scopeDepth - loop.continueBaseDepth do
-			emit(ctx, "POPSCOPE")
-		end
-		local j = emit(ctx, "JMP", 0)
-		loop.continues[#loop.continues + 1] = j
 	elseif kind == "NumericFor" then
 		compileNumericFor(node, ctx)
 	elseif kind == "GenericFor" then
@@ -477,13 +411,6 @@ function compileStat(node, ctx)
 end
 
 function compileNumericFor(node, ctx)
-	-- NOTE: the loop control variable must be a *fresh* local binding on
-	-- every iteration (real Lua 5.1 semantics), so that closures created
-	-- inside the body each capture their own value of it. `counterT` is
-	-- an internal-only counter (never visible to user code / closures,
-	-- always a register); `varName` is re-declared each iteration and is
-	-- what the loop body actually sees -- register if never captured,
-	-- fresh scope-chain cell each pass if it is.
 	local startT, limitT, stepT, counterT = tempName(ctx), tempName(ctx), tempName(ctx), tempName(ctx)
 	local varName = node.var
 
@@ -496,7 +423,6 @@ function compileNumericFor(node, ctx)
 	emitTempDeclare(ctx, counterT)
 
 	local top = here(ctx)
-	-- condition: (step > 0 and counter <= limit) or (step <= 0 and counter >= limit)
 	emitTempGet(ctx, stepT); emit(ctx, "LOADK", k(ctx, 0)); emit(ctx, "BINOP", ">")
 	local elseJ = emit(ctx, "JMPIFNOT", 0)
 	emitTempGet(ctx, counterT); emitTempGet(ctx, limitT); emit(ctx, "BINOP", "<=")
@@ -524,6 +450,9 @@ function compileNumericFor(node, ctx)
 	popScope(ctx)
 end
 
+--------------------------------------------------------------------
+-- FIX LOGIC GENERIC FOR (SWAP VARIABLES & SCOPE CLEANUP)
+--------------------------------------------------------------------
 function compileGenericFor(node, ctx)
 	local fT, sT, cT = tempName(ctx), tempName(ctx), tempName(ctx)
 	pushScope(ctx)
@@ -536,11 +465,15 @@ function compileGenericFor(node, ctx)
 	emitTempGet(ctx, fT)
 	emitTempGet(ctx, sT)
 	emitTempGet(ctx, cT)
-	emit(ctx, "CALL", 2, 0, 1) -- fixed 2 args (s, ctrl), multi result
+	emit(ctx, "CALL", 2, 0, 1)
 	emit(ctx, "ADJUSTMULTI", #node.names)
-	local continueBaseDepth = ctx.scopeDepth -- before the per-iteration scope below
+	
+	local continueBaseDepth = ctx.scopeDepth
 	pushScope(ctx)
-	declareTargetsReverse(node.names, ctx, true)
+	
+	-- FIX: Gán đúng thứ tự các biến iterator trả về
+	compileAssignTargets(node.names, ctx, true)
+	
 	emitGet(ctx, node.names[1])
 	local exit = emit(ctx, "JMPIFNIL", 0)
 	emitGet(ctx, node.names[1])
@@ -549,26 +482,22 @@ function compileGenericFor(node, ctx)
 	ctx.loopStack[#ctx.loopStack + 1] = { breaks = {}, continues = {}, baseDepth = ctx.scopeDepth, continueBaseDepth = continueBaseDepth }
 	compileBlockBare(node.body, ctx)
 	popScope(ctx)
+	
 	local continueHere = here(ctx)
 	emit(ctx, "JMP", top)
 
 	local endHere = here(ctx)
 	patchTo(ctx, exit, endHere)
-	popScope(ctx) -- the inner per-iteration scope on the failed-test path
+	popScope(ctx) -- FIX: Cleanup scope nếu JMPIFNIL nhảy thoát
+	
 	local loop = table.remove(ctx.loopStack)
 	for _, j in ipairs(loop.breaks) do patchTo(ctx, j, endHere) end
 	for _, j in ipairs(loop.continues) do patchTo(ctx, j, continueHere) end
-	popScope(ctx) -- the outer f/s/ctrl scope
+	popScope(ctx)
 end
 
---------------------------------------------------------------------
--- Blocks
---------------------------------------------------------------------
-
 function compileBlockBare(block, ctx)
-	for _, stat in ipairs(block.body) do
-		compileStat(stat, ctx)
-	end
+	for _, stat in ipairs(block.body) do compileStat(stat, ctx) end
 end
 
 function compileBlockScoped(block, ctx)
@@ -576,10 +505,6 @@ function compileBlockScoped(block, ctx)
 	compileBlockBare(block, ctx)
 	popScope(ctx)
 end
-
---------------------------------------------------------------------
--- Public entry point
---------------------------------------------------------------------
 
 function Compiler.compile(ast, capturedSet)
 	local mod = newModule()

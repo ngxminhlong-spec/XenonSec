@@ -1,8 +1,3 @@
---------------------------------------------------------------------
--- XenonSec :: lexer.lua
--- Tokenizer for Lua 5.1 source code.
---------------------------------------------------------------------
-
 local Lexer = {}
 Lexer.__index = Lexer
 
@@ -47,28 +42,27 @@ function Lexer:advance()
 	return c
 end
 
--- Try to read a long bracket [[ ]], [=[ ]=], etc. starting at self.pos which
--- must be at the first '['. Returns the enclosed string and level, or nil if
--- this isn't actually a valid long-bracket opener.
 function Lexer:tryLongBracket()
-	local start = self.pos
+	local startPos = self.pos
+	local startLine = self.line
 	if self:peekChar() ~= "[" then return nil end
-	local p = start + 1
+	local p = startPos + 1
 	local level = 0
 	while self.src:sub(p, p) == "=" do
 		level = level + 1
 		p = p + 1
 	end
 	if self.src:sub(p, p) ~= "[" then return nil end
-	-- consume opener
+	
 	self.pos = p + 1
-	-- skip first newline immediately following opener
 	if self:peekChar() == "\r" then self:advance() end
 	if self:peekChar() == "\n" then self:advance() end
+	
 	local buf = {}
 	local closer = "]" .. string.rep("=", level) .. "]"
 	while true do
 		if self.pos > self.len then
+			self.line = startLine
 			self:error("unterminated long bracket")
 		end
 		if self:peekChar() == "]" then
@@ -78,8 +72,7 @@ function Lexer:tryLongBracket()
 				return table.concat(buf)
 			end
 		end
-		local c = self:advance()
-		buf[#buf + 1] = c
+		buf[#buf + 1] = self:advance()
 	end
 end
 
@@ -92,12 +85,12 @@ function Lexer:skipWhitespaceAndComments()
 		elseif c == "-" and self:peekChar(1) == "-" then
 			self:advance(); self:advance()
 			if self:peekChar() == "[" then
-				local saved = self.pos
+				local savedPos = self.pos
+				local savedLine = self.line
 				local long = self:tryLongBracket()
-				if long ~= nil then
-					-- consumed as long comment
-				else
-					self.pos = saved
+				if long == nil then
+					self.pos = savedPos
+					self.line = savedLine
 					while self:peekChar() ~= nil and self:peekChar() ~= "\n" do self:advance() end
 				end
 			else
@@ -116,7 +109,7 @@ local ESCAPES = {
 
 function Lexer:readString(quote)
 	local buf = {}
-	self:advance() -- opening quote
+	self:advance()
 	while true do
 		local c = self:peekChar()
 		if c == nil or c == "\n" then
@@ -143,7 +136,8 @@ function Lexer:readString(quote)
 				for _ = 1, 2 do
 					if self:peekChar() and self:peekChar():match("%x") then hex = hex .. self:advance() end
 				end
-				buf[#buf + 1] = string.char(tonumber(hex, 16) or 0)
+				if #hex < 2 then self:error("hexadecimal escape sequence too short") end
+				buf[#buf + 1] = string.char(tonumber(hex, 16))
 			elseif ESCAPES[e] ~= nil then
 				self:advance()
 				buf[#buf + 1] = ESCAPES[e]
@@ -216,12 +210,14 @@ function Lexer:next()
 	end
 
 	if c == "[" and (self:peekChar(1) == "[" or self:peekChar(1) == "=") then
-		local saved = self.pos
+		local savedPos = self.pos
+		local savedLine = self.line
 		local long = self:tryLongBracket()
 		if long ~= nil then
 			return { type = "string", value = long, line = line }
 		end
-		self.pos = saved
+		self.pos = savedPos
+		self.line = savedLine
 	end
 
 	local three = self.src:sub(self.pos, self.pos + 2)
@@ -238,7 +234,6 @@ function Lexer:next()
 	return { type = "symbol", value = c, line = line }
 end
 
--- Tokenize the whole source into an array, ending with an 'eof' token.
 function Lexer.tokenize(src, chunkname, luau)
 	local lx = Lexer.new(src, chunkname, luau)
 	local tokens = {}

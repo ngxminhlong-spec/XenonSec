@@ -1,30 +1,13 @@
---------------------------------------------------------------------
--- XenonSec :: fold.lua
--- A small constant-folding pass over the AST, run before renaming and
--- compilation. Purely literal arithmetic (e.g. `2 + 3 * 4`, including
--- expressions the source author wrote out for clarity/magic numbers)
--- is evaluated once at build time and replaced with a single Number
--- literal, so the VM never spends instructions computing it and the
--- constant pool doesn't carry the intermediate operands separately.
---
--- This is a real, conservative constant-propagation/folding pass in
--- the spirit of what an SSA-based optimizer's constant-folding stage
--- would do for straight-line literal arithmetic -- it is NOT a full
--- SSA implementation (no value numbering across variables, no phi
--- nodes, no dataflow analysis of locals). Folding here only ever
--- touches literal-to-literal expressions, so it can never change
--- program behaviour.
---------------------------------------------------------------------
-
 local Fold = {}
 
 local ARITH = {
-  ["+"] = function(a, b) return a + b end,
-  ["-"] = function(a, b) return a - b end,
-  ["*"] = function(a, b) return a * b end,
-  ["/"] = function(a, b) return a / b end,
-  ["%"] = function(a, b) return a % b end,
-  ["^"] = function(a, b) return a ^ b end,
+  ["+"]  = function(a, b) return a + b end,
+  ["-"]  = function(a, b) return a - b end,
+  ["*"]  = function(a, b) return a * b end,
+  ["/"]  = function(a, b) return a / b end,
+  ["%"]  = function(a, b) return a % b end,
+  ["^"]  = function(a, b) return a ^ b end,
+  [".."] = function(a, b) return tostring(a) .. tostring(b) end,
 }
 
 local foldExpr, foldStat, foldBlock
@@ -40,8 +23,11 @@ function foldExpr(node)
     return node
   elseif kind == "Paren" then
     node.expr = foldExpr(node.expr)
-    -- A parenthesized literal is still just that literal for folding
-    -- purposes (Paren only matters for truncating multi-returns).
+    -- Nếu bên trong Paren chỉ là hằng số đơn thuần, tháo bọc Paren
+    local innerKind = node.expr.kind
+    if innerKind == "Number" or innerKind == "String" or innerKind == "True" or innerKind == "False" or innerKind == "Nil" then
+      return node.expr
+    end
     return node
   elseif kind == "Table" then
     for _, field in ipairs(node.fields) do
@@ -63,23 +49,53 @@ function foldExpr(node)
   elseif kind == "Binop" then
     node.lhs = foldExpr(node.lhs)
     node.rhs = foldExpr(node.rhs)
+
+    -- 1. Nối chuỗi String .. String hoặc Number .. String
+    if node.op == ".." then
+      if (node.lhs.kind == "String" or node.lhs.kind == "Number") and
+         (node.rhs.kind == "String" or node.rhs.kind == "Number") then
+        return { kind = "String", value = tostring(node.lhs.value) .. tostring(node.rhs.value), line = node.line }
+      end
+    end
+
+    -- 2. Phép toán số học (Arithmetic)
     local fn = ARITH[node.op]
     if fn and node.lhs.kind == "Number" and node.rhs.kind == "Number" then
       local ok, result = pcall(fn, node.lhs.value, node.rhs.value)
-      -- Guard against things like division producing inf/nan surprises
-      -- being "optimized" into a literal that then prints differently;
-      -- just skip folding if anything looks off, it's a pure bonus pass.
       if ok and type(result) == "number" and result == result
         and result ~= math.huge and result ~= -math.huge then
         return { kind = "Number", value = result, line = node.line }
       end
     end
+
+    -- 3. Phép so sánh hằng số (Comparison)
+    if node.lhs.kind == node.rhs.kind and (node.lhs.kind == "Number" or node.lhs.kind == "String") then
+      if node.op == "==" then return { kind = node.lhs.value == node.rhs.value and "True" or "False", line = node.line } end
+      if node.op == "~=" then return { kind = node.lhs.value ~= node.rhs.value and "True" or "False", line = node.line } end
+    end
+
     return node
   elseif kind == "Unop" then
     node.operand = foldExpr(node.operand)
+    
+    -- Số âm: -Number
     if node.op == "-" and node.operand.kind == "Number" then
       return { kind = "Number", value = -node.operand.value, line = node.line }
     end
+    
+    -- Phủ định Logic: not True / not False
+    if node.op == "not" then
+      if node.operand.kind == "True" then return { kind = "False", line = node.line } end
+      if node.operand.kind == "False" then return { kind = "True", line = node.line } end
+      if node.operand.kind == "Nil" then return { kind = "True", line = node.line } end
+      if node.operand.kind == "Number" or node.operand.kind == "String" then return { kind = "False", line = node.line } end
+    end
+
+    -- Độ dài chuỗi: #String
+    if node.op == "#" and node.operand.kind == "String" then
+      return { kind = "Number", value = #node.operand.value, line = node.line }
+    end
+
     return node
   else
     error("XenonSec fold: unknown expression kind '" .. tostring(kind) .. "'")
@@ -116,10 +132,8 @@ function foldStat(node)
   elseif kind == "Repeat" then
     node.body = foldBlock(node.body)
     node.cond = foldExpr(node.cond)
-  elseif kind == "Break" then
-    -- nothing
-  elseif kind == "Continue" then
-    -- nothing (compiler.lua handles jump targets)
+  elseif kind == "Break" or kind == "Continue" then
+    -- Nothing
   elseif kind == "NumericFor" then
     node.start = foldExpr(node.start)
     node.limit = foldExpr(node.limit)

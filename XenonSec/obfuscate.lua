@@ -1,11 +1,5 @@
---------------------------------------------------------------------
--- XenonSec :: obfuscate.lua
--- Turns a Lua 5.1 source file into a single self-contained, obfuscated
--- output file that runs on a randomized-opcode bytecode VM embedded
--- in the output itself.
---------------------------------------------------------------------
-
 local scriptDir = (debug.getinfo(1, "S").source:match("@?(.*/)") or "./")
+
 local function req(name) return dofile(scriptDir .. name) end
 
 local Parser = req("parser.lua")
@@ -18,13 +12,7 @@ local Compiler = req("compiler.lua")
 local Junk = req("junk.lua")
 
 math.randomseed(os.time() + (tonumber(tostring({}):match("0x(%x+)"), 16) or 0))
--- burn a few values; Lua's stock PRNG is weak but this is for build-time
--- diversification (opcode shuffles / keys), not cryptographic security.
 for _ = 1, 8 do math.random() end
-
---------------------------------------------------------------------
--- Small helpers
---------------------------------------------------------------------
 
 local ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_"
 local function randomIdent(len)
@@ -53,12 +41,6 @@ local function randomByteKey(len)
   return bytes
 end
 
---------------------------------------------------------------------
--- XOR without relying on Lua 5.3 bitwise operators, so the OBFUSCATOR
--- ITSELF stays runnable under plain Lua 5.1 (the bit32/bitwise-operator
--- support differs across 5.1/5.2/5.3). We implement byte-xor manually.
---------------------------------------------------------------------
-
 local function byteXor(a, b)
   local result, bit, x, y = 0, 1, a, b
   while x > 0 or y > 0 do
@@ -70,18 +52,6 @@ local function byteXor(a, b)
   end
   return result
 end
-
---------------------------------------------------------------------
--- A proper stream cipher (RC4-style key-scheduling + pseudo-random
--- generation) rather than a plain repeating-key XOR. A repeating-key
--- XOR is a Vigenere cipher -- textbook-breakable by frequency analysis
--- once there's enough ciphertext, since the keystream repeats with a
--- short, fixed period. This doesn't: the keystream is derived from a
--- key-dependent permutation of a 256-entry state table that mutates on
--- every byte, so it never repeats with any short period (verified
--- empirically against 2000 bytes of keystream, checked against every
--- period up to 64, during development -- no repetition found).
---------------------------------------------------------------------
 
 local function rc4Ksa(key)
   local S = {}
@@ -108,29 +78,6 @@ local function rc4Crypt(data, key)
   end
   return table.concat(out)
 end
-
-local function xorEncode(str, key)
-  return rc4Crypt(str, key)
-end
-
---------------------------------------------------------------------
--- Two further layers on top of RC4, so the cipher isn't "just RC4":
---
--- Layer 2: a keyed integer-only LCG drives a per-byte XOR + rotation.
--- All intermediate values are kept well under 2^53 (Lua's exact-
--- integer double range) so results are bit-for-bit identical on any
--- IEEE-754 platform -- unlike a floating-point chaotic map (a
--- documented source of cross-platform divergence in the chaos-based-
--- crypto literature, and a real risk here specifically since this
--- output has to run correctly on whatever mix of stock Lua/LuaJIT/
--- Luau the end user has, not just the machine that built it).
---
--- Layer 3: CFB-style chaining, where each byte's transform depends on
--- the previous ciphertext byte. This removes RC4's property that one
--- ciphertext byte maps to exactly one plaintext byte via a fixed
--- keystream value -- a structurally different transform an attacker
--- has to separately reverse, not just "more of the same XOR".
---------------------------------------------------------------------
 
 local SEED_MOD, LCG_MULT, LCG_ADD = 16777216, 2654435, 12345
 
@@ -205,9 +152,6 @@ local function cfbUnchain(data, iv)
   return table.concat(out)
 end
 
--- The single entry point used everywhere else in this file: three
--- layers, applied in order. See the round-trip + rotation-consistency
--- self-tests in cipher_test.lua before this was wired in anywhere.
 local function cipherEncrypt(plaintext, key)
   local a = rc4Crypt(plaintext, key)
   local b = diffuseEncrypt(a, key)
@@ -222,11 +166,6 @@ local function cipherDecrypt(ciphertext, key)
   return plaintext
 end
 
---------------------------------------------------------------------
--- Opcode list -- MUST exactly match the opcode names compiler.lua
--- emits. Order here doesn't matter; numbers are assigned randomly.
---------------------------------------------------------------------
-
 local OPCODES = {
   "LOADK", "LOADNIL", "LOADTRUE", "LOADFALSE", "GETVAR", "SETVAR", "DECLLOCAL",
   "NEWTABLE", "GETINDEX", "SETINDEX", "SETLIST", "DUP", "SWAP", "POP",
@@ -235,24 +174,12 @@ local OPCODES = {
   "ADJUSTMULTI", "CALL", "RETURN", "GETREG", "SETREG", "CPLX",
 }
 
--- Instructions whose `a` field is a constant-pool index (everything
--- else's a/b/c fields are raw integers: jump targets, proto indices,
--- register slot numbers, argument counts, etc.)
 local CONST_REF_OPS = {
   LOADK = true, GETVAR = true, SETVAR = true, DECLLOCAL = true,
 }
 
--- BINOP/UNOP operands are raw operator-symbol strings (never const-pool
--- indices, never plaintext in the shipped output either -- see below,
--- where each gets a per-build randomized integer ID instead of a
--- string lookup table).
 local BINOP_SYMBOLS = { "+", "-", "*", "/", "%", "^", "..", "==", "~=", "<", ">", "<=", ">=", "//" }
 local UNOP_SYMBOLS = { "-", "not", "#" }
-
---------------------------------------------------------------------
--- Local addConst helper mirroring compiler.lua's, so we can also fold
--- proto parameter names into the very same interned constant pool.
---------------------------------------------------------------------
 
 local function addConst(mod, value)
   local key = type(value) .. ":" .. tostring(value)
@@ -264,10 +191,6 @@ local function addConst(mod, value)
   return idx
 end
 
---------------------------------------------------------------------
--- Build the obfuscated bundle from a compiled `mod`.
---------------------------------------------------------------------
-
 local ENV_CHECK_NAMES = {
   "print", "pairs", "ipairs", "type", "tostring", "tonumber", "pcall",
   "xpcall", "error", "setmetatable", "rawget", "rawset", "rawequal",
@@ -278,25 +201,20 @@ local function buildBundle(mod, opts)
   opts = opts or {}
   local decoyCount = opts.decoyConstants or (6 + math.random(0, 10))
 
-  -- 1. Fold every proto's CELL-based parameter names (reg=false) into
-  --    the shared constant pool, replacing them with const indices.
-  --    Register-based params (reg=true) already just carry a raw slot
-  --    number and need no interning at all.
   for _, proto in ipairs(mod.protos) do
     local paramIdx = {}
     for i, pdesc in ipairs(proto.params) do
       if pdesc.reg then
         paramIdx[i] = { 0, pdesc.slot }
       else
-        paramIdx[i] = { 1, addConst(mod, pdesc.name) }
+        -- compiler.lua already pooled (and mangled) the captured-param name
+        -- and recorded its index as pdesc.ci; reusing it avoids re-mangling.
+        paramIdx[i] = { 1, pdesc.ci or addConst(mod, pdesc.name) }
       end
     end
     proto.paramIdx = paramIdx
   end
 
-  -- 1.4. Intern the anti-env-logger check names into the SAME
-  --      encrypted pool as everything else -- these must never appear
-  --      as plaintext in the shipped file either.
   local envCheckIdx = {}
   if opts.antiDebug then
     for i, name in ipairs(ENV_CHECK_NAMES) do
@@ -304,21 +222,8 @@ local function buildBundle(mod, opts)
     end
   end
 
-  -- 1.45. The watermark: unlike the inert `--[[Protected by XenonSec]]`
-  --       comment (which is genuinely just decoration -- Lua comments
-  --       never execute, so nothing can make a comment's *survival*
-  --       runtime-checkable), THIS copy is a real encrypted constant
-  --       that gets decoded and re-verified with gsub every run. It's
-  --       covered by the exact same checksum as everything else, so if
-  --       it doesn't decode back to exactly the right text, that's the
-  --       same signal as any other tamper -- not a separate mechanism.
   local watermarkIdx = addConst(mod, "Protected by XenonSec")
 
-  -- 1.5. Sprinkle in decoy constants: random junk strings/numbers that
-  --      no instruction ever references. They shuffle in among the
-  --      real constants below, indistinguishable at rest, and inflate
-  --      the pool so its size no longer correlates with how much the
-  --      program actually does.
   for _ = 1, decoyCount do
     if math.random() < 0.5 then
       mod.consts[#mod.consts + 1] = randomIdent(4 + math.random(0, 12))
@@ -327,11 +232,8 @@ local function buildBundle(mod, opts)
     end
   end
 
-  -- 2. Shuffle the constant pool order and remap every reference to it
-  --    (LOADK/GETVAR/SETVAR/DECLLOCAL/BINOP/UNOP `a` fields, plus the
-  --    proto parameter indices we just created).
   local n = #mod.consts
-  local perm = shuffledRange(n) -- perm[oldIndex] = newIndex
+  local perm = shuffledRange(n)
   local shuffledConsts = {}
   for oldIdx = 1, n do shuffledConsts[perm[oldIdx]] = mod.consts[oldIdx] end
 
@@ -349,14 +251,6 @@ local function buildBundle(mod, opts)
   for i, oldIdx in ipairs(envCheckIdx) do envCheckIdx[i] = perm[oldIdx] end
   watermarkIdx = perm[watermarkIdx]
 
-  -- 3. Randomize opcode numbers for this build. Binary/unary operator
-  --    symbols get their OWN randomized integer IDs too, so BINOP/UNOP
-  --    instructions embed a plain per-build integer directly -- no
-  --    "+"/"-"/"=="-keyed lookup table needs to exist anywhere in the
-  --    shipped file (previously the runtime carried a small literal
-  --    table mapping each operator symbol string to a fixed ID, which
-  --    leaked the VM's own operator model in plaintext even though the
-  --    compiled PROGRAM's use of it was already encrypted).
   local opNums = shuffledRange(#OPCODES)
   local OPNUM = {}
   for i, name in ipairs(OPCODES) do OPNUM[name] = opNums[i] end
@@ -369,16 +263,6 @@ local function buildBundle(mod, opts)
   local UNNUM = {}
   for i, sym in ipairs(UNOP_SYMBOLS) do UNNUM[sym] = unNums[i] end
 
-  -- 4. Encrypt every constant. Each entry becomes a ciphertext string;
-  --    a 1-byte tag ('N' or 'S') on the plaintext records its original
-  --    Lua type so the runtime can decode both uniformly. Numbers get
-  --    an extra reversible additive mask (v + A) applied BEFORE
-  --    encryption -- "number-expression" style obfuscation, layered
-  --    underneath the XOR cipher rather than instead of it. Deliberately
-  --    additive-only (no multiply/divide): division always produces a
-  --    float in Lua, which would silently turn integer constants into
-  --    floats on 5.2+ hosts (invisible on 5.1, which has no int/float
-  --    distinction, but needless fragility elsewhere).
   local key = randomByteKey(12 + math.random(0, 8))
   local maskA = math.random(-999999, 999999)
   local cipherConsts = {}
@@ -392,11 +276,6 @@ local function buildBundle(mod, opts)
     cipherConsts[i] = cipherEncrypt(tagged, key)
   end
 
-  -- 5. Serialize protos as compact arrays: code[i] = {op, a, b, c}.
-  --    Also fold every number that ends up in the output (ciphertext
-  --    bytes + every opcode/operand in every proto) into one checksum,
-  --    computed with the exact same arithmetic the runtime will use to
-  --    recompute it -- this is the anti-tamper integrity value.
   local function mixChecksum(h, n) return (h * 31 + (n or 0)) % 2147483647 end
   local checksum = 5381
   for _, c in ipairs(cipherConsts) do
@@ -453,12 +332,6 @@ local function buildBundle(mod, opts)
     watermarkIdx = watermarkIdx,
   }
 end
-
---------------------------------------------------------------------
--- Runtime VM template. %PLACEHOLDER% tokens are substituted with
--- randomly generated identifiers (per build, for signature diversity)
--- and with this build's randomized opcode numbers.
---------------------------------------------------------------------
 
 local VM_TEMPLATE = [===[
 local %unpack% = table.unpack or unpack
@@ -623,10 +496,6 @@ local function %run%(%mod%, ...)
       elseif %op% == %OP_SETREG% and %OPQ_SETREG% then
         %regs%[%instr%[2]] = %pop%(); %ip% = %ip% + 1
       elseif %op% == %OP_CPLX% and %OPQ_CPLX% then
-        -- A genuinely richer instruction, used only for junk noise: it
-        -- really does compute something (not a trivial push+pop pair),
-        -- but every path through it nets to zero real stack effect, so
-        -- it's exactly as safe to splice in anywhere as any other junk.
         local %cxN% = (%instr%[2] or 3) % 7
         local %cxAcc% = 0
         for %cxI% = 1, %cxN% do
@@ -761,15 +630,6 @@ end
 
 return %run%]===]
 
---------------------------------------------------------------------
--- Substitute %name% placeholders. Placeholders starting with "N_" get
--- this build's randomized opcode NUMBER; everything else gets a fresh
--- random identifier (the same placeholder always maps to the same
--- generated name within one build).
---------------------------------------------------------------------
-
--- Generic %name% substitution. `resolve(tok)` returns the replacement
--- string for a placeholder token, or nil to leave it as an error.
 local function substitute(template, resolve)
   return (template:gsub("%%([%a_][%w_]*)%%", function(tok)
     local v = resolve(tok)
@@ -778,41 +638,24 @@ local function substitute(template, resolve)
   end))
 end
 
--- Renders the VM engine template: any %N_OPNAME% becomes this build's
--- randomized opcode number; every other %ident% becomes a fresh random
--- identifier (memoized so the same placeholder always maps to the same
--- generated name within this one render).
---------------------------------------------------------------------
--- Nested opaque predicates: boolean expressions built from small
--- number-theoretic identities that are true for EVERY integer V (not
--- probabilistically true -- provably true for all V), so ANDing one
--- into a dispatch check never changes behavior. Genuinely nested
--- (each predicate is threaded inside the next via `and`, not just a
--- flat AND-list), and a fresh combination is picked per opcode per
--- build, so the exact expression differs both across opcodes within
--- one build and across builds of the same script.
---------------------------------------------------------------------
-
 local OPAQUE_IDENTITIES = {
-  "((V*V-V)%2==0)",                          -- v^2 - v is always even
-  "(((V+1)*(V+1)-V*V-2*V-1)==0)",             -- (v+1)^2 - v^2 - 2v - 1 == 0
-  "((V%2)*(V%2)==(V%2))",                     -- v mod 2 is idempotent under squaring
-  "(((V*V)%4)~=2)",                           -- v^2 mod 4 is never 2
-  "(((V-V)*(V+7))==0)",                       -- v - v is always 0
-  "((V*3-V*2-V)==0)",                         -- 3v - 2v - v == 0
-  "(((V*V+V)%2)==0)",                         -- v^2 + v is always even
-  "(((V*(V+1)*(V+2))%6)==0)",                 -- product of 3 consecutive ints divisible by 6
-  "((((V*V*V)-V)%6)==0)",                     -- v^3 - v divisible by 6 (v(v-1)(v+1))
-  "(((V+V)%2)==0)",                           -- v + v is always even
-  "((V*V)>=0)",                               -- a square is never negative
-  "((V==V))",                                 -- reflexivity
-  "(not (V~=V))",                             -- negated-inequality reflexivity
-  "(((V*5-V*4-V))==0)",                       -- 5v - 4v - v == 0
-  "(((V*V-V*V))==0)",                         -- v^2 - v^2 == 0
+  "((V*V-V)%2==0)",
+  "(((V+1)*(V+1)-V*V-2*V-1)==0)",
+  "((V%2)*(V%2)==(V%2))",
+  "(((V*V)%4)~=2)",
+  "(((V-V)*(V+7))==0)",
+  "((V*3-V*2-V)==0)",
+  "(((V*V+V)%2)==0)",
+  "(((V*(V+1)*(V+2))%6)==0)",
+  "((((V*V*V)-V)%6)==0)",
+  "(((V+V)%2)==0)",
+  "((V*V)>=0)",
+  "((V==V))",
+  "(not (V~=V))",
+  "(((V*5-V*4-V))==0)",
+  "(((V*V-V*V))==0)",
 }
 
--- Logical negations of the same identities, for decoy branches that
--- must NEVER be taken (see genAlwaysFalsePredicate below).
 local FALSE_IDENTITIES = {
   "((V*V-V)%2==1)",
   "(((V+1)*(V+1)-V*V-2*V-1)~=0)",
@@ -841,11 +684,6 @@ local function genOpaquePredicate(probeName, depth)
   return expr
 end
 
--- A provably-never-true guard for decoy dispatch branches: the body
--- behind it is genuine, syntactically valid Lua that a static reader
--- has to spend time understanding, but it can never execute -- an
--- always-false identity ANDed with an always-true one (so it's not
--- trivially a single obviously-negated check sitting alone).
 local function genAlwaysFalsePredicate(probeName)
   local falseIdx = math.random(1, #FALSE_IDENTITIES)
   local trueIdx = math.random(1, #OPAQUE_IDENTITIES)
@@ -854,8 +692,6 @@ local function genAlwaysFalsePredicate(probeName)
   return "(" .. f .. " and " .. t .. ")"
 end
 
--- Safe placeholder-token names for operator symbols (can't embed "+"
--- etc directly in a %word% token).
 local BINOP_TOKEN_NAMES = {
   ["+"] = "PLUS", ["-"] = "MINUS", ["*"] = "MUL", ["/"] = "DIV",
   ["%"] = "MOD", ["^"] = "POW", [".."] = "CONCAT",
@@ -864,12 +700,6 @@ local BINOP_TOKEN_NAMES = {
 }
 local UNOP_TOKEN_NAMES = { ["-"] = "UNM", ["not"] = "NOT", ["#"] = "LEN" }
 
--- Decoy dispatch branches: syntactically real Lua, guarded by an
--- always-false predicate so they can never execute (a static reader
--- can't tell that from reading the condition alone -- same shape as
--- the real, always-true guards on every genuine branch). Pure
--- analysis noise: inflates the apparent opcode count and makes a
--- purely-structural read of the dispatch chain unreliable.
 local function genDecoyBranches(ensureName, count)
   local push, pop, peek = ensureName("push"), ensureName("pop"), ensureName("peek")
   local stack, sp, ip = ensureName("stack"), ensureName("sp"), ensureName("ip")
@@ -939,9 +769,6 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM)
       error("unknown unop placeholder " .. tok)
     end
     if tok:sub(1, 4) == "OPQ_" then
-      -- A fresh nested opaque predicate per opcode, referencing the
-      -- shared per-call `probe` counter (always some changing integer
-      -- at the point it's checked -- the identities hold for any V).
       local probe = ensureName("probe")
       return genOpaquePredicate(probe, 2 + math.random(0, 2))
     end
@@ -952,13 +779,7 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM)
   end)
 end
 
---------------------------------------------------------------------
--- Header template: XOR/decode helpers + the decrypted constant pool
--- + the literal proto table, all with randomized local names.
---------------------------------------------------------------------
-
 local HEADER_TEMPLATE = [===[
---[[Protected by XenonSec]]
 local %byte% = string.byte
 local %char% = string.char
 local %concat% = table.concat
@@ -976,11 +797,6 @@ end
 local %key% = __XS_KEY__
 local %maskA% = __XS_MASKA__
 
--- Three-layer decrypt, undone in reverse order of how it was applied:
--- CFB-unchain, then the LCG-keyed rotation/XOR diffusion layer, then
--- RC4. See obfuscate.lua's cipherEncrypt/cipherDecrypt for why each
--- layer is there -- this is the exact same construction, just spelled
--- out with per-build randomized names.
 local function %rotr8%(%rb%, %rn%)
   %rn% = %rn% % 8
   if %rn% == 0 then return %rb% end
@@ -1045,25 +861,8 @@ end
 local %raw% = { __XS_CIPHERS__ }
 local %protos% = { __XS_PROTOS__ }
 
---------------------------------------------------------------------
--- Anti-tamper: a checksum computed at build time over every byte of
--- the ciphertext pool and every opcode/operand in every proto is
--- re-verified here, BEFORE anything gets decoded. On mismatch the key
--- is silently corrupted rather than raising an obvious error -- the
--- script keeps running and fails somewhere downstream with a
--- confusing, unrelated-looking error instead of pointing straight at
--- the check that caught it.
---------------------------------------------------------------------
-
 local %corrupt% = function()
   for %kci% = 1, #%key% do %key%[%kci%] = (%key%[%kci%] + 97) % 256 end
-  -- The key only protects the encrypted string/number pool -- the
-  -- proto/bytecode table itself is plain literal Lua data, never
-  -- decrypted via the key at all. So a tamper landing purely inside
-  -- the bytecode wouldn't be neutralized by corrupting the key alone.
-  -- Force EVERY instruction in EVERY proto to an opcode number that
-  -- can never match any real one, so the very first instruction any
-  -- proto executes fails immediately, no matter where the tamper was.
   for %cpi% = 1, #%protos% do
     local %cpc% = %protos%[%cpi%].c
     for %cpj% = 1, #%cpc% do %cpc%[%cpj%][1] = -1 end
@@ -1093,15 +892,6 @@ end
 
 if not %verify%() then %corrupt%() end
 
---------------------------------------------------------------------
--- Anti-debug (opt-in, see --antidebug): a debug hook set on this
--- coroutine is a strong signal of an attached debugger/profiler --
--- normal execution never sets one itself. A tight-loop timing check
--- backs it up (single-stepping/breakpoints make trivial work take
--- implausibly long). Both are guarded so a host without `debug`/`os`
--- (common in sandboxed embeddings) just skips them, no error either way.
---------------------------------------------------------------------
-
 if __XS_ANTIDEBUG__ then
   local %dok%, %dlib% = pcall(function() return debug end)
   if %dok% and %dlib% and %dlib%.gethook then
@@ -1124,11 +914,6 @@ for %i2% = 1, #%raw% do
   if %tg% == "N" then %consts%[%i2%] = tonumber(%dv%:sub(2)) - %maskA% else %consts%[%i2%] = %dv%:sub(2) end
 end
 
--- Watermark integrity: the decoded copy must gsub-match the exact
--- expected text. This can only ever fail alongside the checksum
--- failing too (both are reading the same encrypted payload) -- it's
--- not an independent detector, just one more thing that has to keep
--- adding up for execution to continue past this point.
 do
   local %wmVal% = %consts%[__XS_WMIDX__]
   local %wmChecked%, %wmCount% = %wmVal%:gsub("Protected by XenonSec", "Protected by XenonSec")
@@ -1136,14 +921,6 @@ do
 end
 
 if __XS_ANTIDEBUG__ then
-  -- Anti-env-logger: a common instrumentation trick is replacing a
-  -- global like `print` or `pairs` with a table carrying a `__call`
-  -- metamethod, so every call gets logged before it's forwarded to the
-  -- real function. `type()` on such a proxy reports "table", never
-  -- "function" -- a cheap, zero-false-positive tell, since nothing
-  -- legitimate has a reason to make these anything but real functions.
-  -- The names being checked are themselves pulled from the SAME
-  -- encrypted constant pool as everything else -- never plaintext.
   local %envIdx% = { __XS_ENVIDX__ }
   for %eni% = 1, #%envIdx% do
     local %enName% = %consts%[%envIdx%[%eni%]]
@@ -1156,46 +933,45 @@ local FOOTER_TEMPLATE = [===[
 if not %verify%() then %corrupt%() end
 return (%engine%)({ %consts%, %protos%, __XS_MAIN__ }, ...)]===]
 
---------------------------------------------------------------------
--- Minification: strips comments/leading-trailing whitespace and blank
--- lines from our OWN template skeletons, before any generated payload
--- (ciphertext / proto literals) is spliced in. Safe specifically
--- because at this point the template text contains no multi-line
--- string payloads yet -- only hand-written template source we control.
---------------------------------------------------------------------
-
 local function minifyTemplateText(text)
   local lines = {}
   for line in (text .. "\n"):gmatch("(.-)\n") do
     local trimmed = line:match("^%s*(.-)%s*$")
     if trimmed ~= "" and not (trimmed:sub(1, 2) == "--" and trimmed:sub(1, 4) ~= "--[[" and trimmed:sub(1, 4) ~= "--]]") then
-      trimmed = trimmed:gsub("%s+", " ")
       lines[#lines + 1] = trimmed
     end
   end
-  -- Heavy mode: join every statement with a single space instead of a
-  -- newline, collapsing the whole template to one dense line. A plain
-  -- space is always a safe token separator in Lua regardless of what
-  -- the two adjacent tokens are, so this can never glue two tokens
-  -- together incorrectly -- it just removes every newline/indent byte
-  -- that isn't doing any syntactic work.
-  return table.concat(lines, " ")
+  return table.concat(lines, "\n")
 end
 
---------------------------------------------------------------------
--- Public entry point
---------------------------------------------------------------------
+-- Replaces EVERY occurrence (some placeholders, e.g. __XS_ANTIDEBUG__,
+-- appear more than once in the header template; a single-shot replace
+-- would leave the later ones as raw identifiers in the emitted code).
+local function plainReplace(str, target, replacement)
+  local out, pos = {}, 1
+  while true do
+    local s, e = str:find(target, pos, true)
+    if not s then
+      out[#out + 1] = str:sub(pos)
+      break
+    end
+    out[#out + 1] = str:sub(pos, s - 1)
+    out[#out + 1] = replacement
+    pos = e + 1
+  end
+  return table.concat(out)
+end
 
 local DEFAULTS = {
   minify = true,
   junkRate = 0.12,
-  decoyConstants = nil, -- nil => randomized count, see buildBundle
+  decoyConstants = nil,
   localizeGlobals = true,
   fold = true,
   ssa = true,
   luau = false,
-  antiTamper = true,   -- checksum-verified payload; zero false-positive risk, on by default
-  antiDebug = false,   -- debug.gethook + timing checks; real false-positive risk, opt-in
+  antiTamper = true,
+  antiDebug = false,
 }
 
 local function obfuscate(source, chunkname, opts)
@@ -1205,15 +981,11 @@ local function obfuscate(source, chunkname, opts)
   end
 
   local ast = Parser.parse(source, chunkname or "input", opts.luau)
-  -- Computed on the pristine AST (capture analysis only cares about
-  -- lexical structure, which Fold/SSA never change) so SSA can safely
-  -- know which names are reachable-via-closure and must never be
-  -- treated as safe-to-cache across a function call.
   local earlyCaptured = Capture.analyze(ast)
   if opts.fold then Fold.apply(ast) end
   if opts.ssa then
     SSA.apply(ast, earlyCaptured)
-    if opts.fold then Fold.apply(ast) end -- a second fold pass catches arithmetic SSA just exposed
+    if opts.fold then Fold.apply(ast) end
   end
   if opts.localizeGlobals then Localize.apply(ast) end
   Renamer.resolve(ast)
@@ -1233,11 +1005,9 @@ local function obfuscate(source, chunkname, opts)
   local ciphersLit = table.concat(cipherLits, ",")
   local protosLit = table.concat(bundle.protoLits, ",")
 
-  -- Shared names between header and footer (consts/protos locals) must
-  -- match, so render both from one nameCache.
   local nameCache = {}
   local function resolveShared(tok)
-    if tok == "engine" then return nil end -- filled per-template below
+    if tok == "engine" then return nil end
     if not nameCache[tok] then nameCache[tok] = randomIdent() end
     return nameCache[tok]
   end
@@ -1246,27 +1016,22 @@ local function obfuscate(source, chunkname, opts)
   local footerTpl = opts.minify and minifyTemplateText(FOOTER_TEMPLATE) or FOOTER_TEMPLATE
 
   local header = substitute(headerTpl, resolveShared)
-  header = header:gsub("__XS_KEY__", keyLit)
-  header = header:gsub("__XS_MASKA__", tostring(bundle.maskA))
-  header = header:gsub("__XS_CIPHERS__", (ciphersLit:gsub("%%", "%%%%")))
-  header = header:gsub("__XS_PROTOS__", (protosLit:gsub("%%", "%%%%")))
-  header = header:gsub("__XS_CHECKSUM__", tostring(bundle.checksum))
-  header = header:gsub("__XS_ANTITAMPER_ON__", tostring(opts.antiTamper))
-  header = header:gsub("__XS_ANTIDEBUG__", tostring(opts.antiDebug))
-  header = header:gsub("__XS_ENVIDX__", table.concat(bundle.envCheckIdx, ","))
-  header = header:gsub("__XS_WMIDX__", tostring(bundle.watermarkIdx))
+  header = plainReplace(header, "__XS_KEY__", keyLit)
+  header = plainReplace(header, "__XS_MASKA__", tostring(bundle.maskA))
+  header = plainReplace(header, "__XS_CIPHERS__", ciphersLit)
+  header = plainReplace(header, "__XS_PROTOS__", protosLit)
+  header = plainReplace(header, "__XS_CHECKSUM__", tostring(bundle.checksum))
+  header = plainReplace(header, "__XS_ANTITAMPER_ON__", tostring(opts.antiTamper))
+  header = plainReplace(header, "__XS_ANTIDEBUG__", tostring(opts.antiDebug))
+  header = plainReplace(header, "__XS_ENVIDX__", table.concat(bundle.envCheckIdx, ","))
+  header = plainReplace(header, "__XS_WMIDX__", tostring(bundle.watermarkIdx))
 
   local footer = substitute(footerTpl, function(tok)
     if tok == "engine" then return "(function()\n" .. engineSrc .. "\nend)()" end
     return resolveShared(tok)
   end)
-  footer = footer:gsub("__XS_MAIN__", tostring(bundle.mainProto))
+  footer = plainReplace(footer, "__XS_MAIN__", tostring(bundle.mainProto))
 
-  -- Wrap the ENTIRE output (header locals: key/decode/consts/protos,
-  -- plus the engine call) inside one outer closure, so the finished
-  -- file is a single `return (function(...) ... end)(...)` expression
-  -- -- nothing (opcode numbers, decode key, helper names, consts,
-  -- protos) sits at the chunk's top level at all.
   local combined = header .. "\n" .. footer
   return "return (function(...)\n" .. combined .. "\nend)(...)\n"
 end
