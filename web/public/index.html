@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>XenonSec Playground</title>
+<meta name="description" content="Paste a Lua or Luau script and get a VM-protected version. Works on phone and desktop.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%235b4cdb'/%3E%3Ctext x='16' y='22' font-size='16' text-anchor='middle' fill='white' font-family='Arial' font-weight='700'%3EX%3C/text%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --ink: #151821;
+    --muted: #5b6272;
+    --line: #d9dde6;
+    --accent: #5b4cdb;
+    --accent-ink: #ffffff;
+    --accent-soft: #ebe9fb;
+    --danger: #b3261e;
+    --danger-soft: #fdecea;
+    --ok: #1b7f4b;
+    --code-bg: #0f1218;
+    --code-ink: #e6e9f2;
+    --radius: 14px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0c0e13;
+      --panel: #161a22;
+      --ink: #e9ecf3;
+      --muted: #9aa3b5;
+      --line: #2a303c;
+      --accent: #8b7cff;
+      --accent-ink: #0c0e13;
+      --accent-soft: #262246;
+      --danger: #ff8a80;
+      --danger-soft: #3a1d1b;
+      --ok: #5fd39a;
+      --code-bg: #07090d;
+      --code-ink: #dfe4ee;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0c0e13;
+    --panel: #161a22;
+    --ink: #e9ecf3;
+    --muted: #9aa3b5;
+    --line: #2a303c;
+    --accent: #8b7cff;
+    --accent-ink: #0c0e13;
+    --accent-soft: #262246;
+    --danger: #ff8a80;
+    --danger-soft: #3a1d1b;
+    --ok: #5fd39a;
+    --code-bg: #07090d;
+    --code-ink: #dfe4ee;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); }
+  body {
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-text-size-adjust: 100%;
+    padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 20px 16px 48px; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+  .logo {
+    width: 40px; height: 40px; border-radius: 10px; flex: 0 0 auto;
+    background: linear-gradient(135deg, var(--accent), #2f8cff);
+    display: grid; place-items: center; color: #fff; font-weight: 800; font-size: 18px;
+  }
+  h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 14px; margin: 2px 0 0; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 16px; margin-bottom: 14px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; white-space: nowrap; }
+  .hint { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  button, .btn {
+    font: inherit; font-size: 15px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--panel); color: var(--ink); padding: 10px 14px; min-height: 44px;
+    cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+  }
+  button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+    outline: 3px solid var(--accent-soft); outline-offset: 1px; border-color: var(--accent);
+  }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  .primary {
+    background: var(--accent); color: var(--accent-ink); border-color: transparent;
+    font-weight: 650; width: 100%; min-height: 52px; font-size: 17px;
+  }
+  .ghost { background: transparent; }
+  textarea, select {
+    width: 100%; font: 16px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px; min-height: 220px; resize: vertical; tab-size: 2;
+  }
+  select { font-family: inherit; min-height: 44px; padding: 8px 10px; }
+  .out { background: var(--code-bg); color: var(--code-ink); min-height: 260px; border-color: #1f2430; }
+  .count { color: var(--muted); font-size: 13px; margin-left: auto; font-variant-numeric: tabular-nums; }
+  .opts { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; }
+  .opt {
+    display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px;
+    border: 1px solid var(--line); border-radius: 10px; cursor: pointer; min-height: 44px;
+  }
+  .opt input { width: 20px; height: 20px; margin: 1px 0 0; accent-color: var(--accent); flex: 0 0 auto; }
+  .opt b { display: block; font-size: 14.5px; font-weight: 600; }
+  .opt small { display: block; color: var(--muted); font-size: 12.5px; line-height: 1.35; }
+  .opt:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+  .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+  .field label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  .field input[type=number] {
+    width: 100%; font: inherit; color: var(--ink); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; min-height: 44px;
+  }
+  .status { margin: 12px 0 0; min-height: 0; }
+  .error {
+    background: var(--danger-soft); color: var(--danger); border-radius: 10px;
+    padding: 10px 12px; font-size: 14.5px; white-space: pre-wrap; word-break: break-word;
+  }
+  .stats { color: var(--muted); font-size: 13px; margin: 8px 0 0; font-variant-numeric: tabular-nums; }
+  .ok { color: var(--ok); }
+  .spin {
+    width: 16px; height: 16px; border: 2px solid currentColor; border-right-color: transparent;
+    border-radius: 50%; display: inline-block; vertical-align: -3px; margin-right: 8px;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  details summary { cursor: pointer; font-size: 14px; color: var(--muted); padding: 4px 0; }
+  footer { color: var(--muted); font-size: 13px; margin-top: 24px; line-height: 1.55; }
+  .file-input { display: none; }
+
+  @media (max-width: 560px) {
+    .wrap { padding: 14px 12px 40px; }
+    .fields { grid-template-columns: 1fr; }
+    .card { padding: 14px; }
+    textarea { min-height: 180px; }
+    .out { min-height: 200px; }
+    .actions { flex-direction: column; align-items: stretch; }
+    .actions .btn { width: 100%; }
+    .count { width: 100%; margin-left: 0; }
+  }
+  @media (min-width: 720px) {
+    .split { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+    .split .card { margin-bottom: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo" aria-hidden="true">X</div>
+    <div>
+      <h1>XenonSec Playground</h1>
+      <p class="sub">Turn a Lua or Luau script into a VM-protected one.</p>
+    </div>
+  </header>
+
+  <div class="split">
+    <section class="card" aria-labelledby="src-h">
+      <h2 id="src-h">
+        <span>1 · Your script</span>
+        <span class="count" id="count">0 chars</span>
+      </h2>
+      <textarea id="src" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off"
+        placeholder="Paste Lua or Luau code here…"></textarea>
+      <div class="row actions" style="margin-top:10px">
+        <button type="button" class="btn" id="load-file">Open file</button>
+        <button type="button" class="btn ghost" id="load-sample">Use sample</button>
+        <button type="button" class="btn ghost" id="clear-src">Clear</button>
+        <input type="file" id="file" class="file-input" accept=".lua,.luau,.txt,text/plain">
+      </div>
+      <p class="hint">Up to 100 KB. Your code is sent to the server only to be obfuscated and is not stored.</p>
+    </section>
+
+    <section class="card" aria-labelledby="opt-h">
+      <h2 id="opt-h">2 · Options</h2>
+      <div class="opts">
+        <label class="opt"><input type="checkbox" id="o-luau">
+          <span><b>Luau syntax</b><small>Enable if the script uses <code>+=</code>, <code>continue</code>, <code>//</code> or type annotations.</small></span></label>
+        <label class="opt"><input type="checkbox" id="o-minify" checked>
+          <span><b>Minify output</b><small>Smaller file. Turn off only to debug.</small></span></label>
+        <label class="opt"><input type="checkbox" id="o-proxify">
+          <span><b>ProxifyLocal</b><small>Hides registers and captured locals behind proxies. Slower.</small></span></label>
+        <label class="opt"><input type="checkbox" id="o-antidebug">
+          <span><b>Anti-debug</b><small>Detects debug hooks and env loggers. Can false-positive with profilers.</small></span></label>
+        <label class="opt"><input type="checkbox" id="o-antitamper" checked>
+          <span><b>Anti-tamper</b><small>Checksum that stops the file running if it is edited.</small></span></label>
+        <label class="opt"><input type="checkbox" id="o-flush" checked>
+          <span><b>Flush constant cache</b><small>Clears decoded strings periodically to limit plaintext in memory.</small></span></label>
+        <label class="opt"><input type="checkbox" id="o-fold" checked>
+          <span><b>Constant folding</b><small>Pre-computes literal arithmetic.</small></span></label>
+        <label class="opt"><input type="checkbox" id="o-ssa" checked>
+          <span><b>Value propagation</b><small>Removes dead stores and redundant moves.</small></span></label>
+        <label class="opt"><input type="checkbox" id="o-localize" checked>
+          <span><b>Localize globals</b><small>Turns global lookups into local aliases.</small></span></label>
+      </div>
+      <div class="fields">
+        <div class="field">
+          <label for="o-strength">Strength (decoy and clutter level)</label>
+          <select id="o-strength">
+            <option value="1">1 · light</option>
+            <option value="2" selected>2 · default</option>
+            <option value="3">3 · heavy</option>
+            <option value="4">4 · maximum</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="o-junk">Junk rate 0–1 (blank = auto)</label>
+          <input type="number" id="o-junk" min="0" max="1" step="0.01" placeholder="auto" inputmode="decimal">
+        </div>
+      </div>
+      <details style="margin-top:10px">
+        <summary>More: decoy constants</summary>
+        <div class="field" style="margin-top:8px">
+          <label for="o-decoys">Decoy constants 0–200 (blank = auto)</label>
+          <input type="number" id="o-decoys" min="0" max="200" step="1" placeholder="auto" inputmode="numeric">
+        </div>
+      </details>
+    </section>
+  </div>
+
+  <div style="margin:14px 0">
+    <button type="button" class="btn primary" id="run">Obfuscate</button>
+    <div class="status" id="status" role="status" aria-live="polite"></div>
+  </div>
+
+  <section class="card" aria-labelledby="out-h">
+    <h2 id="out-h">
+      <span>3 · Result</span>
+      <span class="count" id="out-count"></span>
+    </h2>
+    <textarea id="out" class="out" readonly spellcheck="false" placeholder="The obfuscated script appears here."></textarea>
+    <div class="row actions" style="margin-top:10px">
+      <button type="button" class="btn" id="copy" disabled>Copy</button>
+      <button type="button" class="btn" id="download" disabled>Download .lua</button>
+    </div>
+    <p class="stats" id="stats"></p>
+  </section>
+
+  <footer>
+    <p><strong>What this is:</strong> XenonSec rewrites your code so it is hard to read. It is not an unbreakable
+    lock: anyone who can run the code can, with effort, recover its behaviour. Use it to raise the cost of reading,
+    not to hide secrets. Never put passwords or API keys in client-side code.</p>
+    <p><strong>Use it only on code you own</strong> or have permission to protect.</p>
+    <p>Requests are processed on the server in a temporary folder that is deleted after each run. Nothing is logged
+    or stored by the playground.</p>
+  </footer>
+</div>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const src = $("src"), out = $("out"), run = $("run"), status = $("status");
+  const SAMPLE = `-- Sample: a small script with a table, a closure and string work.
+local Counter = {}
+Counter.__index = Counter
+
+function Counter.new(step)
+  return setmetatable({ n = 0, step = step or 1 }, Counter)
+end
+
+function Counter:tick()
+  self.n = self.n + self.step
+  return self.n
+end
+
+local c = Counter.new(3)
+for i = 1, 4 do c:tick() end
+print("count:", c.n, string.format("%05.1f", c.n / 2))
+`;
+
+  function setStatus(html, kind) {
+    status.innerHTML = "";
+    if (!html) return;
+    const el = document.createElement("div");
+    el.className = kind === "error" ? "error" : "stats";
+    el.innerHTML = html;
+    status.appendChild(el);
+  }
+  function setErrorText(text) {
+    status.innerHTML = "";
+    const el = document.createElement("div");
+    el.className = "error";
+    el.textContent = text;
+    status.appendChild(el);
+  }
+  function updateCount() {
+    const n = src.value.length;
+    $("count").textContent = n.toLocaleString() + " chars";
+  }
+  function fmtBytes(n) {
+    return n < 1024 ? n + " B" : (n / 1024).toFixed(1) + " KB";
+  }
+
+  function readOptions() {
+    const o = {
+      luau: $("o-luau").checked,
+      minify: $("o-minify").checked,
+      proxify: $("o-proxify").checked,
+      antiDebug: $("o-antidebug").checked,
+      antiTamper: $("o-antitamper").checked,
+      flushConsts: $("o-flush").checked,
+      fold: $("o-fold").checked,
+      ssa: $("o-ssa").checked,
+      localizeGlobals: $("o-localize").checked,
+      strength: Number($("o-strength").value),
+      junkRate: null,
+      decoyConstants: null,
+    };
+    const j = $("o-junk").value.trim();
+    if (j !== "") o.junkRate = Number(j);
+    const d = $("o-decoys").value.trim();
+    if (d !== "") o.decoyConstants = Math.round(Number(d));
+    return o;
+  }
+
+  function setBusy(busy) {
+    run.disabled = busy;
+    run.innerHTML = busy ? '<span class="spin" aria-hidden="true"></span>Obfuscating…' : "Obfuscate";
+  }
+
+  async function obfuscate() {
+    const code = src.value;
+    if (!code.trim()) {
+      setErrorText("Paste some Lua code first.");
+      src.focus();
+      return;
+    }
+    setStatus("");
+    setBusy(true);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 40000);
+    try {
+      const res = await fetch("/api/obfuscate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code, options: readOptions() }),
+        signal: controller.signal,
+      });
+      let data = null;
+      try { data = await res.json(); } catch (_) { /* non-JSON error page */ }
+      if (!res.ok || !data || typeof data.output !== "string") {
+        setErrorText((data && data.error) || ("Request failed (HTTP " + res.status + ")."));
+        return;
+      }
+      out.value = data.output;
+      $("out-count").textContent = fmtBytes(data.bytes);
+      $("copy").disabled = false;
+      $("download").disabled = false;
+      const ratio = code.length ? (data.bytes / new Blob([code]).size).toFixed(1) : "–";
+      setStatus('<span class="ok">Done</span> in ' + data.ms + " ms · " + fmtBytes(data.bytes) +
+        " output · about " + ratio + "× the input size", "ok");
+      out.scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (err) {
+      setErrorText(err && err.name === "AbortError"
+        ? "The request timed out. Try a smaller script or lower strength."
+        : "Could not reach the server. Check your connection and try again.");
+    } finally {
+      clearTimeout(timer);
+      setBusy(false);
+    }
+  }
+
+  function copyResult() {
+    const text = out.value;
+    const done = () => { $("copy").textContent = "Copied"; setTimeout(() => $("copy").textContent = "Copy", 1600); };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(done, () => fallbackCopy(text, done));
+    } else {
+      fallbackCopy(text, done);
+    }
+  }
+  function fallbackCopy(text, done) {
+    out.removeAttribute("readonly");
+    out.select();
+    out.setSelectionRange(0, text.length);
+    try { if (document.execCommand("copy")) done(); } catch (_) { /* ignore */ }
+    out.setAttribute("readonly", "");
+    out.blur();
+  }
+  function download() {
+    const blob = new Blob([out.value], { type: "text/plain;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "script.xenon.lua";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  }
+
+  src.addEventListener("input", updateCount);
+  run.addEventListener("click", obfuscate);
+  $("copy").addEventListener("click", copyResult);
+  $("download").addEventListener("click", download);
+  $("load-sample").addEventListener("click", () => { src.value = SAMPLE; updateCount(); src.focus(); });
+  $("clear-src").addEventListener("click", () => { src.value = ""; updateCount(); src.focus(); });
+  $("load-file").addEventListener("click", () => $("file").click());
+  $("file").addEventListener("change", (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    if (f.size > 100 * 1024) { setErrorText("That file is over 100 KB."); e.target.value = ""; return; }
+    const reader = new FileReader();
+    reader.onload = () => { src.value = String(reader.result || ""); updateCount(); };
+    reader.onerror = () => setErrorText("Could not read that file.");
+    reader.readAsText(f);
+    e.target.value = "";
+  });
+  $("o-strength").addEventListener("change", () => {});
+  updateCount();
+})();
+</script>
+</body>
+</html>
