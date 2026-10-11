@@ -311,5 +311,57 @@ if false then error("never") else w = "safe" end
 print(w)
 ]])
 
+do
+  local function check(name, cond, detail)
+    total = total + 1
+    if cond then print("[ OK ] " .. name); pass = pass + 1
+    else print("[FAIL] " .. name .. (detail and (" -- " .. detail) or "")) end
+  end
+  -- A leading shebang (`#!/usr/bin/env lute`) is common in Lute scripts
+  -- and must not break parsing. It's skipped, and later lines keep their
+  -- original numbering.
+  local src = '#!/usr/bin/env lute\nlocal t = 0\nfor i = 1, 5 do t += i end\nprint(t)\n'
+  local ok, out = pcall(Obf.obfuscate, src, "sb", { luau = true })
+  check("shebang line is accepted in Luau mode", ok, tostring(out))
+  if ok then
+    local chunk = load(out, "sb", "t")
+    local captured = {}
+    local realPrint = print
+    print = function(...)
+      local p = {}
+      for i = 1, select("#", ...) do p[i] = tostring((select(i, ...))) end
+      captured[#captured + 1] = table.concat(p, "\t")
+    end
+    local runOk = pcall(chunk)
+    print = realPrint
+    check("shebang script runs and prints correct result", runOk and captured[1] == "15",
+      ("ok=%s out=%s"):format(tostring(runOk), tostring(captured[1])))
+  end
+end
+
+do
+  -- A global written by the program must be visible through _G on hosts
+  -- where _G is the live environment (Lua 5.1 / 5.3 / Lune), and must not
+  -- break anything where it isn't (Lute), where raw code sees nil too.
+  local src = "x = 1\nprint(rawget(_G, 'x'))\n"
+  local ok, out = pcall(Obf.obfuscate, src, "gr", { luau = true })
+  total = total + 1
+  if not ok then print("[FAIL] _G read-back build -- " .. tostring(out))
+  else
+    local captured = {}
+    local realPrint = print
+    print = function(...)
+      local p = {}
+      for i = 1, select("#", ...) do p[i] = tostring((select(i, ...))) end
+      captured[#captured + 1] = table.concat(p, "\t")
+    end
+    local chunk = load(out, "gr", "t")
+    local runOk = pcall(chunk)
+    print = realPrint
+    if runOk and captured[1] == "1" then print("[ OK ] program global visible through _G (live env)"); pass = pass + 1
+    else print("[FAIL] program global not visible through _G -- got " .. tostring(captured[1])) end
+  end
+end
+
 print()
 print(pass .. " / " .. total .. " luau end-to-end tests passed")

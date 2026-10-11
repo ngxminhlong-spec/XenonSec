@@ -29,11 +29,17 @@ Options:
                    string interpolation, generalized iteration,
                    attributes, binary/underscore numeric literals,
                    \u{} string escapes)
+  --no-flush       Keep decoded constants cached for the whole run (default:
+                   the cache is flushed every 65536 steps, see the README)
+  --proxify        ProxifyLocal: registers and captured locals live in proxy
+                   objects (stronger against static reading, slower)
   --junk <0..1>    Junk-instruction injection rate (default: auto-scaled
                    to input size, roughly 0.20-0.55; pass a value to
                    override; 0 disables)
   --decoys <n>     Number of decoy constants to inject (default:
                    auto-scaled to input size; pass a value to override)
+  --strength <1-4> Decoy/clutter level (default 2). Scales decoy handlers and
+                   decoy constants. Adds bulk, not secrecy: see the README.
   -h               Show this help
 
 ]])
@@ -73,8 +79,14 @@ while i <= #args do
     opts.antiTamper = false; i = i + 1
   elseif a == "--antidebug" then
     opts.antiDebug = true; i = i + 1
+  elseif a == "--no-flush" then
+    opts.flushConsts = false; i = i + 1
+  elseif a == "--proxify" then
+    opts.proxify = true; i = i + 1
   elseif a == "--junk" then
     opts.junkRate = tonumber(args[i + 1]); i = i + 2
+  elseif a == "--strength" then
+    opts.strength = tonumber(args[i + 1]); i = i + 2
   elseif a == "--decoys" then
     opts.decoyConstants = tonumber(args[i + 1]); i = i + 2
   else

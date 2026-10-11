@@ -45,7 +45,7 @@ print(x)
     ("ok=%s output=%s"):format(tostring(ok1), tostring(output1)))
 
   -- Tamper a byte squarely inside the first bytecode instruction tuple.
-  local tuplePos = out:find("{%d+,%d+,%d+,%d+}")
+  local tuplePos = out:find("{%d+,%d+,%d+,%d+,%d+}")  -- {op,a,b,c,seed}
   check("found a bytecode tuple to tamper", tuplePos ~= nil)
   if tuplePos then
     local pos = tuplePos -- position of the opening '{'... flip the char right after it
@@ -211,7 +211,11 @@ print(table.concat(t, ","))
   check("heavy junk rate (many CPLX + junk instructions) still correct",
     ok and output == "1,1,2,3,5,8,13,21",
     ("ok=%s output=%s err=%s"):format(tostring(ok), tostring(output), tostring(err)))
-  check("decoy branches present in output", out:find("elseif") ~= nil)
+  -- Handler-table entries: 32 real opcodes plus decoys. A count above 32 means
+  -- decoy handlers were emitted (they are never reachable at runtime).
+  local _, handlerEntries = out:gsub("%] = function%(", "")
+  check("decoy handlers present in output", handlerEntries > 32,
+    ("handler entries=%d"):format(handlerEntries))
 end
 
 do
@@ -233,6 +237,49 @@ print(acc, t[1](), t[3](), t[5]())
     end
   end
   check("8 independent randomized builds all agree with each other", allOk)
+end
+
+
+do
+  -- A debugger attached AFTER startup must still be caught: the periodic
+  -- check in the dispatch loop, not just the one-shot startup probe.
+  local src = [[
+    local n = 0
+    for i = 1, 20000 do n = n + i end
+    debug.sethook(function() end, "", 1000000)
+    local m = 0
+    for i = 1, 20000 do m = m + i end
+    debug.sethook()
+    print("finished", n, m)
+  ]]
+  local out = Obf.obfuscate(src, "t", { antiDebug = true })
+  local captured = {}
+  local realPrint = print
+  print = function(...)
+    local p = {}
+    for i = 1, select("#", ...) do p[i] = tostring((select(i, ...))) end
+    captured[#captured + 1] = table.concat(p, "\t")
+  end
+  local chunk = load(out, "t")
+  local ok, err = pcall(chunk)
+  debug.sethook()
+  print = realPrint
+  check("mid-run debugger attach is detected (periodic check)", not ok and #captured == 0,
+    ("ok=%s captured=%d err=%s"):format(tostring(ok), #captured, tostring(err)))
+end
+
+do
+  -- Regression: a long single-frame loop used to abort with a bad opcode
+  -- once the opaque predicates' probe counter passed ~2^17 (cubic terms
+  -- stopped being exact in doubles). Must run to completion in both modes.
+  local src = "local t = 0 for i = 1, 200000 do t = t + i end print(t)"
+  local expected = "20000100000"
+  for _, opts in ipairs({ {}, { antiDebug = true } }) do
+    local ok, err, _, output = run(src, opts)
+    check("long loop (200k iterations) completes correctly, antiDebug="
+      .. tostring(opts.antiDebug == true), ok and output == expected,
+      ("ok=%s output=%s err=%s"):format(tostring(ok), tostring(output), tostring(err)))
+  end
 end
 
 print()

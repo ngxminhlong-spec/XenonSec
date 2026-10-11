@@ -16,6 +16,7 @@ local Renamer = req("renamer.lua")
 local Capture = req("capture.lua")
 local Compiler = req("compiler.lua")
 local Junk = req("junk.lua")
+local Passes = req("passes.lua")
 
 math.randomseed(os.time() + (tonumber(tostring({}):match("0x(%x+)"), 16) or 0))
 -- burn a few values; Lua's stock PRNG is weak but this is for build-time
@@ -83,13 +84,25 @@ end
 -- period up to 64, during development -- no repetition found).
 --------------------------------------------------------------------
 
+-- Per-build cipher parameters. Nothing here is a textbook constant: the
+-- seed basis, the LCG multiplier/addend and the RC4-variant multiplier are
+-- drawn for every build, and the runtime header is emitted with the same
+-- values (see obfuscateOnce). Set by setCipherParams before any encryption.
+local CIPHER = {}
+local function setCipherParams()
+  CIPHER.basis = math.random(0, 16777215)
+  CIPHER.mult = 4 * math.random(0, 4194303) + 1 -- = 1 (mod 4): full LCG period mod 2^24
+  CIPHER.add = 2 * math.random(0, 8388607) + 1  -- odd, as the full-period condition needs
+  CIPHER.rcMult = 2 * math.random(0, 127) + 1   -- odd multiplier for the RC4-style step
+end
+
 local function rc4Ksa(key)
   local S = {}
   for i = 0, 255 do S[i] = i end
   local j = 0
   local keylen = #key
   for i = 0, 255 do
-    j = (j + S[i] + key[(i % keylen) + 1]) % 256
+    j = (j * CIPHER.rcMult + S[i] + key[(i % keylen) + 1]) % 256
     S[i], S[j] = S[j], S[i]
   end
   return S
@@ -101,7 +114,7 @@ local function rc4Crypt(data, key)
   local out = {}
   for n = 1, #data do
     i = (i + 1) % 256
-    j = (j + S[i]) % 256
+    j = (j * CIPHER.rcMult + S[i]) % 256
     S[i], S[j] = S[j], S[i]
     local K = S[(S[i] + S[j]) % 256]
     out[n] = string.char(byteXor(data:byte(n), K))
@@ -132,19 +145,19 @@ end
 -- has to separately reverse, not just "more of the same XOR".
 --------------------------------------------------------------------
 
-local SEED_MOD, LCG_MULT, LCG_ADD = 16777216, 2654435, 12345
+local SEED_MOD = 16777216
 
 local function deriveSeed(key)
-  local seed = 2166136261 % SEED_MOD
+  local seed = CIPHER.basis
   for i = 1, #key do
     seed = byteXor(seed, key[i])
-    seed = (seed * LCG_MULT + LCG_ADD) % SEED_MOD
+    seed = (seed * CIPHER.mult + CIPHER.add) % SEED_MOD
   end
   return seed
 end
 
 local function lcgNext(seed)
-  seed = (seed * LCG_MULT + LCG_ADD) % SEED_MOD
+  seed = (seed * CIPHER.mult + CIPHER.add) % SEED_MOD
   return seed, math.floor(seed / 65536) % 256
 end
 
@@ -298,8 +311,9 @@ local function spnDecrypt(data, key)
 end
 
 -- The single entry point used everywhere else in this file: four
--- layers, applied in order. See the round-trip + rotation-consistency
--- self-tests in cipher_test.lua before this was wired in anywhere.
+-- layers, applied in order. Every obfuscated program decodes its constants
+-- through the matching runtime code, so the suites exercise the round trip
+-- on every build (any mismatch fails at the first constant read).
 local function cipherEncrypt(plaintext, key)
   local a = rc4Crypt(plaintext, key)
   local b = diffuseEncrypt(a, key)
@@ -322,26 +336,39 @@ end
 --------------------------------------------------------------------
 
 local OPCODES = {
-  "LOADK", "LOADNIL", "LOADTRUE", "LOADFALSE", "GETVAR", "SETVAR", "DECLLOCAL",
-  "NEWTABLE", "GETINDEX", "SETINDEX", "SETLIST", "DUP", "SWAP", "POP",
-  "BINOP", "UNOP", "JMP", "JMPIFNOT", "JMPIFNIL", "TESTANDJMP", "TESTORJMP",
-  "CLOSURE", "NEWSCOPE", "POPSCOPE", "VARARGONE", "VARARGMULTI",
-  "ADJUSTMULTI", "CALL", "RETURN", "GETREG", "SETREG", "CPLX",
+  "LOADK", "LOADNIL", "LOADTRUE", "LOADFALSE", "MOVE",
+  "GETVAR", "SETVAR", "DECLCELL",
+  "NEWTABLE", "GETIDX", "SETIDX", "GETIDXK", "SETIDXK", "SETLISTM", "SELF",
+  "CLOSURE", "VARARG", "CALL", "CALLM", "RET", "RETM",
+  "JMP", "JF", "JT", "JNIL", "NEWSCOPE", "POPSCOPE", "JUNK",
 }
 
 -- Instructions whose `a` field is a constant-pool index (everything
 -- else's a/b/c fields are raw integers: jump targets, proto indices,
 -- register slot numbers, argument counts, etc.)
-local CONST_REF_OPS = {
-  LOADK = true, GETVAR = true, SETVAR = true, DECLLOCAL = true,
-}
+local BINOP_SYMBOLS = Compiler.BINOP_SYMBOLS
+local UNOP_SYMBOLS = Compiler.UNOP_SYMBOLS
+-- One opcode per binary operator (register and constant right-hand forms)
+-- and per unary operator.
+for k = 1, #BINOP_SYMBOLS do
+  OPCODES[#OPCODES + 1] = "BIN" .. k
+  OPCODES[#OPCODES + 1] = "BINK" .. k
+end
+for k = 1, #UNOP_SYMBOLS do
+  OPCODES[#OPCODES + 1] = "UN" .. k
+end
 
--- BINOP/UNOP operands are raw operator-symbol strings (never const-pool
--- indices, never plaintext in the shipped output either -- see below,
--- where each gets a per-build randomized integer ID instead of a
--- string lookup table).
-local BINOP_SYMBOLS = { "+", "-", "*", "/", "%", "^", "..", "==", "~=", "<", ">", "<=", ">=", "//" }
-local UNOP_SYMBOLS = { "-", "not", "#" }
+-- Which operand field of each opcode holds a constant-pool index (the rest
+-- are raw integers: registers, counts, jump targets, proto indices).
+local CONST_FIELD = {
+  LOADK = "b", GETVAR = "b", SETVAR = "b", DECLCELL = "b", SETIDXK = "b",
+  GETIDXK = "c", SELF = "c", SETLISTM = "c", JUNK = "b",
+}
+local function constField(op)
+  if CONST_FIELD[op] then return CONST_FIELD[op] end
+  if op:sub(1, 4) == "BINK" then return "c" end
+  return nil
+end
 
 --------------------------------------------------------------------
 -- Local addConst helper mirroring compiler.lua's, so we can also fold
@@ -368,6 +395,16 @@ local ENV_CHECK_NAMES = {
   "select", "next",
 }
 
+-- How many decoy handlers a build gets. Scales with program size, so a big
+-- real program earns a proportionally bigger decoy dispatch chain. Decided
+-- in buildBundle so the key pool can be sized to hold real keys and decoys.
+local function decoyHandlerCount(totalInstr, strength)
+  local mult = strength or 1
+  local base = (10 + math.floor((totalInstr or 0) / 15)) * mult
+  if base > 60 * mult then base = 60 * mult end
+  return math.floor(base + math.random(0, 10) * mult)
+end
+
 local function buildBundle(mod, opts)
   opts = opts or {}
   local decoyCount = opts.decoyConstants or (16 + math.random(0, 24))
@@ -391,12 +428,8 @@ local function buildBundle(mod, opts)
   -- 1.4. Intern the anti-env-logger check names into the SAME
   --      encrypted pool as everything else -- these must never appear
   --      as plaintext in the shipped file either.
-  local envCheckIdx = {}
-  if opts.antiDebug then
-    for i, name in ipairs(ENV_CHECK_NAMES) do
-      envCheckIdx[i] = addConst(mod, name)
-    end
-  end
+  -- (The env-logger check now reads these builtins directly by name; see
+  -- the header. They are standard globals the engine already names.)
 
   -- 1.45. The watermark: unlike the inert `--[[Protected by XenonSec]]`
   --       comment (which is genuinely just decoration -- Lua comments
@@ -429,19 +462,37 @@ local function buildBundle(mod, opts)
   local shuffledConsts = {}
   for oldIdx = 1, n do shuffledConsts[perm[oldIdx]] = mod.consts[oldIdx] end
 
+  -- Host globals read by the program (never written by it) get a live getter
+  -- in the header, so runtimes whose globals are not reachable through a
+  -- table (Lute, Roblox) still resolve them. Names are host API names, not
+  -- secrets; names the program writes stay in encrypted constants.
+  local readNames, writtenNames = {}, {}
   for _, proto in ipairs(mod.protos) do
     for _, instr in ipairs(proto.code) do
-      if CONST_REF_OPS[instr.op] then
-        instr.a = perm[instr.a]
-      end
+      if instr.op == "GETVAR" then readNames[mod.consts[instr.b]] = true end
+      if instr.op == "SETVAR" then writtenNames[mod.consts[instr.b]] = true end
+    end
+  end
+  local liveNames = {}
+  for name in pairs(readNames) do
+    if type(name) == "string" and name:match("^[%a_][%w_]*$") and not writtenNames[name] then
+      liveNames[#liveNames + 1] = name
+    end
+  end
+  table.sort(liveNames)
+
+  for _, proto in ipairs(mod.protos) do
+    for _, instr in ipairs(proto.code) do
+      local cf = constField(instr.op)
+      if cf then instr[cf] = perm[instr[cf]] end
     end
     for _, pair in ipairs(proto.paramIdx) do
       if pair[1] == 1 then pair[2] = perm[pair[2]] end
     end
   end
 
-  for i, oldIdx in ipairs(envCheckIdx) do envCheckIdx[i] = perm[oldIdx] end
   watermarkIdx = perm[watermarkIdx]
+
 
   -- 3. Randomize opcode numbers for this build. Binary/unary operator
   --    symbols get their OWN randomized integer IDs too, so BINOP/UNOP
@@ -451,17 +502,29 @@ local function buildBundle(mod, opts)
   --    table mapping each operator symbol string to a fixed ID, which
   --    leaked the VM's own operator model in plaintext even though the
   --    compiled PROGRAM's use of it was already encrypted).
-  local opNums = shuffledRange(#OPCODES)
+  -- Every opcode, operator and decoy key is a distinct random number in one
+  -- wide range. Real keys used to be a dense 1..n block and decoys a sparse
+  -- block of 4-digit numbers, which separated them on sight.
+  -- The pool is a random permutation of 1..(real + decoys), so the handler
+  -- table is dense: array-speed lookups, and no key range that separates
+  -- decoys from real opcodes.
+  local totalInstrB = 0
+  for _, proto in ipairs(mod.protos) do totalInstrB = totalInstrB + #proto.code end
+  local decoyCount = decoyHandlerCount(totalInstrB, opts.strength or 1)
+  local realCount = #OPCODES + #BINOP_SYMBOLS + #UNOP_SYMBOLS
+  local pool = shuffledRange(realCount + decoyCount)
+  local poolNext = 0
+  local function freeKey()
+    poolNext = poolNext + 1
+    assert(poolNext <= #pool, "XenonSec: handler key pool exhausted")
+    return pool[poolNext]
+  end
   local OPNUM = {}
-  for i, name in ipairs(OPCODES) do OPNUM[name] = opNums[i] end
-
-  local binNums = shuffledRange(#BINOP_SYMBOLS)
+  for _, name in ipairs(OPCODES) do OPNUM[name] = freeKey() end
   local BINNUM = {}
-  for i, sym in ipairs(BINOP_SYMBOLS) do BINNUM[sym] = binNums[i] end
-
-  local unNums = shuffledRange(#UNOP_SYMBOLS)
+  for _, sym in ipairs(BINOP_SYMBOLS) do BINNUM[sym] = freeKey() end
   local UNNUM = {}
-  for i, sym in ipairs(UNOP_SYMBOLS) do UNNUM[sym] = unNums[i] end
+  for _, sym in ipairs(UNOP_SYMBOLS) do UNNUM[sym] = freeKey() end
 
   -- 4. Encrypt every constant. Each entry becomes a ciphertext string;
   --    a 1-byte tag ('N' or 'S') on the plaintext records its original
@@ -486,6 +549,25 @@ local function buildBundle(mod, opts)
     cipherConsts[i] = cipherEncrypt(tagged, key)
   end
 
+  -- 4.5. Opcode encoding. Every stored opcode is (key + salt(ip)) mod MOD,
+  --       where salt(ip) = (ip * saltA + saltB) mod MOD depends on the
+  --       instruction's position. Equal opcodes therefore look different
+  --       on disk, and the runtime undoes it with the same constants.
+  local MOD = 1048573
+  local saltM1 = math.random(2, MOD - 2)
+  local saltM2 = math.random(2, MOD - 2)
+  -- The mask for one field depends on that instruction's own random seed
+  -- and the field's slot (1 = opcode, 2..4 = operands). There is no
+  -- position-only pattern to recover.
+  local function fieldMask(seed, slot)
+    return (seed * saltM1 + slot * saltM2) % MOD
+  end
+  local function encodeField(v, seed, slot)
+    assert(type(v) == "number" and v >= 0 and v < MOD and v == math.floor(v),
+      "XenonSec: instruction field out of encodable range: " .. tostring(v))
+    return (v + fieldMask(seed, slot)) % MOD
+  end
+
   -- 5. Serialize protos as compact arrays: code[i] = {op, a, b, c}.
   --    Also fold every number that ends up in the output (ciphertext
   --    bytes + every opcode/operand in every proto) into one checksum,
@@ -500,41 +582,54 @@ local function buildBundle(mod, opts)
   local protoLits = {}
   for _, proto in ipairs(mod.protos) do
     checksum = mixChecksum(checksum, proto.hasVararg and 1 or 0)
+    local psum = mixChecksum(5381, proto.hasVararg and 1 or 0)
     local codeParts = {}
-    for _, instr in ipairs(proto.code) do
+    for ipIdx, instr in ipairs(proto.code) do
+      local seed = math.random(0, MOD - 1)
       local opn = OPNUM[instr.op]
-      local a
-      if instr.op == "BINOP" then
-        a = BINNUM[instr.a]
-      elseif instr.op == "UNOP" then
-        a = UNNUM[instr.a]
-      else
-        a = instr.a or 0
-      end
+      local a = instr.a or 0
       local b = instr.b or 0
       local c = instr.c or 0
-      checksum = mixChecksum(checksum, opn)
-      checksum = mixChecksum(checksum, a)
-      checksum = mixChecksum(checksum, b)
-      checksum = mixChecksum(checksum, c)
-      codeParts[#codeParts + 1] = string.format("{%d,%s,%s,%s}", opn, tostring(a), tostring(b), tostring(c))
+      local eop = encodeField(opn, seed, 1)
+      local ea = encodeField(a, seed, 2)
+      local eb = encodeField(b, seed, 3)
+      local ec = encodeField(c, seed, 4)
+      checksum = mixChecksum(checksum, seed)
+      checksum = mixChecksum(checksum, eop)
+      checksum = mixChecksum(checksum, ea)
+      checksum = mixChecksum(checksum, eb)
+      checksum = mixChecksum(checksum, ec)
+      psum = mixChecksum(psum, seed)
+      psum = mixChecksum(psum, eop)
+      psum = mixChecksum(psum, ea)
+      psum = mixChecksum(psum, eb)
+      psum = mixChecksum(psum, ec)
+      codeParts[#codeParts + 1] = string.format("{%d,%d,%d,%d,%d}", eop, ea, eb, ec, seed)
     end
     local paramParts = {}
     for _, pair in ipairs(proto.paramIdx) do
       checksum = mixChecksum(checksum, pair[1])
       checksum = mixChecksum(checksum, pair[2])
+      psum = mixChecksum(psum, pair[1])
+      psum = mixChecksum(psum, pair[2])
       paramParts[#paramParts + 1] = string.format("{%d,%d}", pair[1], pair[2])
     end
+    checksum = mixChecksum(checksum, psum)
     protoLits[#protoLits + 1] = string.format(
-      "{p={%s},v=%s,c={%s}}",
+      "{p={%s},v=%s,k=%d,c={%s}}",
       table.concat(paramParts, ","),
       proto.hasVararg and "true" or "false",
+      psum,
       table.concat(codeParts, ",")
     )
   end
 
   return {
     cipherConsts = cipherConsts,
+    liveNames = liveNames,
+    saltM1 = saltM1,
+    saltM2 = saltM2,
+    mod = MOD,
     key = key,
     maskA = maskA,
     protoLits = protoLits,
@@ -542,8 +637,9 @@ local function buildBundle(mod, opts)
     OPNUM = OPNUM,
     BINNUM = BINNUM,
     UNNUM = UNNUM,
+    freeKey = freeKey,
+    decoyCount = decoyCount,
     checksum = checksum,
-    envCheckIdx = envCheckIdx,
     watermarkIdx = watermarkIdx,
   }
 end
@@ -610,243 +706,371 @@ local %UNOPS% = {
 
 local %NILV% = setmetatable({}, { __tostring = function() return "<xs-nil>" end })
 
-local %OP_LOADK%,%OP_LOADNIL%,%OP_LOADTRUE%,%OP_LOADFALSE%,%OP_GETVAR%,%OP_SETVAR%,%OP_DECLLOCAL%,
-      %OP_NEWTABLE%,%OP_GETINDEX%,%OP_SETINDEX%,%OP_SETLIST%,%OP_DUP%,%OP_SWAP%,%OP_POP%,
-      %OP_BINOP%,%OP_UNOP%,%OP_JMP%,%OP_JMPIFNOT%,%OP_JMPIFNIL%,%OP_TESTANDJMP%,%OP_TESTORJMP%,
-      %OP_CLOSURE%,%OP_NEWSCOPE%,%OP_POPSCOPE%,%OP_VARARGONE%,%OP_VARARGMULTI%,
-      %OP_ADJUSTMULTI%,%OP_CALL%,%OP_RETURN%,%OP_GETREG%,%OP_SETREG%,%OP_CPLX%
-  = %N_LOADK%,%N_LOADNIL%,%N_LOADTRUE%,%N_LOADFALSE%,%N_GETVAR%,%N_SETVAR%,%N_DECLLOCAL%,
-    %N_NEWTABLE%,%N_GETINDEX%,%N_SETINDEX%,%N_SETLIST%,%N_DUP%,%N_SWAP%,%N_POP%,
-    %N_BINOP%,%N_UNOP%,%N_JMP%,%N_JMPIFNOT%,%N_JMPIFNIL%,%N_TESTANDJMP%,%N_TESTORJMP%,
-    %N_CLOSURE%,%N_NEWSCOPE%,%N_POPSCOPE%,%N_VARARGONE%,%N_VARARGMULTI%,
-    %N_ADJUSTMULTI%,%N_CALL%,%N_RETURN%,%N_GETREG%,%N_SETREG%,%N_CPLX%
+local %OP_LOADK%,%OP_LOADNIL%,%OP_LOADTRUE%,%OP_LOADFALSE%,%OP_MOVE%,%OP_GETVAR%,%OP_SETVAR%,%OP_DECLCELL%,
+      %OP_NEWTABLE%,%OP_GETIDX%,%OP_SETIDX%,%OP_GETIDXK%,%OP_SETIDXK%,%OP_SETLISTM%,%OP_SELF%,
+      %OP_CLOSURE%,%OP_VARARG%,%OP_CALL%,%OP_CALLM%,%OP_RET%,%OP_RETM%,
+      %OP_JMP%,%OP_JF%,%OP_JT%,%OP_JNIL%,%OP_NEWSCOPE%,%OP_POPSCOPE%,%OP_JUNK%
+  = %N_LOADK%,%N_LOADNIL%,%N_LOADTRUE%,%N_LOADFALSE%,%N_MOVE%,%N_GETVAR%,%N_SETVAR%,%N_DECLCELL%,
+    %N_NEWTABLE%,%N_GETIDX%,%N_SETIDX%,%N_GETIDXK%,%N_SETIDXK%,%N_SETLISTM%,%N_SELF%,
+    %N_CLOSURE%,%N_VARARG%,%N_CALL%,%N_CALLM%,%N_RET%,%N_RETM%,
+    %N_JMP%,%N_JF%,%N_JT%,%N_JNIL%,%N_NEWSCOPE%,%N_POPSCOPE%,%N_JUNK%
 
 local function %run%(%mod%, ...)
   local %consts%, %protos%, %mainIdx% = %mod%[1], %mod%[2], %mod%[3]
+  local %adHook% = %mod%[4]
+  local %GETG% = %mod%[5]
+  local %SETG% = %mod%[6]
+  local %brick% = function()
+    for %bi% = 1, #%protos% do
+      local %bc% = %protos%[%bi%].c
+      for %bj% = 1, #%bc% do %bc%[%bj%][1] = nil end
+    end
+  end
+
+  %PROXYMETA%
+  -- Walks the cell chain for a captured local; nil means "global".
+  local function %lookup%(%F%, %name%)
+    local %s% = %F%.%scope%
+    while %s% do
+      if %s%.%varsField%[%name%] ~= nil then return %s% end
+      %s% = %s%.%parentField%
+    end
+    return nil
+  end
 
   local %runProto%
+  local function %mkClosure%(%F%, %pIdx%)
+    local %cs% = %F%.%scope%
+    return function(...)
+      return %runProto%(%pIdx%, %pack%(...), %cs%)
+    end
+  end
+
+  -- Field decoder: stored = (value + mask(seed, slot)) mod MOD. The
+  -- dispatcher inlines the same arithmetic; this copy serves the verifier.
+  local function %dec%(%v%, %sd%, %slot%)
+    return (%v% - (%sd% * %K_M1% + %slot% * %K_M2%) % %K_MOD%) % %K_MOD%
+  end
+
+  -- Per-proto integrity: recompute one proto's checksum and compare it with
+  -- the value stored in its literal (same arithmetic as the build).
+  local function %vp%(%pi%)
+    local %pp% = %protos%[%pi%]
+    local %hh% = 5381
+    local function %mm%(%n%) %hh% = (%hh% * 31 + (%n% or 0)) % 2147483647 end
+    %mm%(%pp%.v and 1 or 0)
+    for %vk% = 1, #%pp%.c do
+      local %vi% = %pp%.c[%vk%]
+      %mm%(%vi%[5]); %mm%(%vi%[1]); %mm%(%vi%[2]); %mm%(%vi%[3]); %mm%(%vi%[4])
+    end
+    for %vj% = 1, #%pp%.p do %mm%(%pp%.p[%vj%][1]); %mm%(%pp%.p[%vj%][2]) end
+    return %hh% == %pp%.k
+  end
+
+  -- Handler table: one handler per opcode, keyed by its per-build number.
+  -- Each handler takes the frame and the instruction, reads its decoded
+  -- operands from the frame (a = x2, b = x3, c = x4), and moves the
+  -- instruction pointer. Registers live in F.regs; nothing is pushed or popped.
+  local %H% = {}
+
+  %H%[%OP_LOADK%] = function(%F%, %ins%)
+    if not (%OPQ_LOADK%) then error() end
+    %F%.%regs%[%F%.%x2%] = %consts%[%F%.%x3%]
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+  %H%[%OP_LOADNIL%] = function(%F%, %ins%)
+    if not (%OPQ_LOADNIL%) then error() end
+    local %r% = %F%.%regs%
+    for %i% = %F%.%x2%, %F%.%x2% + %F%.%x3% - 1 do %r%[%i%] = nil end
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+  %H%[%OP_LOADTRUE%] = function(%F%, %ins%)
+    if not (%OPQ_LOADTRUE%) then error() end
+    %F%.%regs%[%F%.%x2%] = true
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+  %H%[%OP_LOADFALSE%] = function(%F%, %ins%)
+    if not (%OPQ_LOADFALSE%) then error() end
+    %F%.%regs%[%F%.%x2%] = false
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+  %H%[%OP_MOVE%] = function(%F%, %ins%)
+    if not (%OPQ_MOVE%) then error() end
+    local %r% = %F%.%regs%
+    %r%[%F%.%x2%] = %r%[%F%.%x3%]
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+  %H%[%OP_GETVAR%] = function(%F%, %ins%)
+    if not (%OPQ_GETVAR%) then error() end
+    local %nm% = %consts%[%F%.%x3%]
+    local %sc% = %lookup%(%F%, %nm%)
+    local %r% = %F%.%regs%
+    if %sc% then
+      local %v% = %sc%.%varsField%[%nm%]
+      if %v% == %NILV% then %r%[%F%.%x2%] = nil else %r%[%F%.%x2%] = %v% end
+    else
+      %r%[%F%.%x2%] = %GETG%(%nm%)
+    end
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+  %H%[%OP_SETVAR%] = function(%F%, %ins%)
+    if not (%OPQ_SETVAR%) then error() end
+    local %nm% = %consts%[%F%.%x3%]
+    local %v% = %F%.%regs%[%F%.%x2%]
+    local %sc% = %lookup%(%F%, %nm%)
+    if %sc% then
+      %sc%.%varsField%[%nm%] = (%v% == nil) and %NILV% or %v%
+    else
+      %SETG%(%nm%, %v%)
+    end
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+  %H%[%OP_DECLCELL%] = function(%F%, %ins%)
+    if not (%OPQ_DECLCELL%) then error() end
+    local %v% = %F%.%regs%[%F%.%x2%]
+    %F%.%scope%.%varsField%[%consts%[%F%.%x3%]] = (%v% == nil) and %NILV% or %v%
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+  %H%[%OP_NEWTABLE%] = function(%F%, %ins%)
+    if not (%OPQ_NEWTABLE%) then error() end
+    %F%.%regs%[%F%.%x2%] = {}
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+  %H%[%OP_GETIDX%] = function(%F%, %ins%)
+    if not (%OPQ_GETIDX%) then error() end
+    local %r% = %F%.%regs%
+    %r%[%F%.%x2%] = %r%[%F%.%x3%][%r%[%F%.%x4%]]
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+  %H%[%OP_SETIDX%] = function(%F%, %ins%)
+    if not (%OPQ_SETIDX%) then error() end
+    local %r% = %F%.%regs%
+    %r%[%F%.%x2%][%r%[%F%.%x3%]] = %r%[%F%.%x4%]
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+  %H%[%OP_GETIDXK%] = function(%F%, %ins%)
+    if not (%OPQ_GETIDXK%) then error() end
+    local %r% = %F%.%regs%
+    %r%[%F%.%x2%] = %r%[%F%.%x3%][%consts%[%F%.%x4%]]
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+  %H%[%OP_SETIDXK%] = function(%F%, %ins%)
+    if not (%OPQ_SETIDXK%) then error() end
+    local %r% = %F%.%regs%
+    %r%[%F%.%x2%][%consts%[%F%.%x3%]] = %r%[%F%.%x4%]
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+  %H%[%OP_SETLISTM%] = function(%F%, %ins%)
+    if not (%OPQ_SETLISTM%) then error() end
+    local %r% = %F%.%regs%
+    local %t% = %r%[%F%.%x2%]
+    local %off% = %consts%[%F%.%x4%]
+    for %j% = 1, %F%.%top% do %t%[%off% + %j%] = %r%[%F%.%x3% + %j% - 1] end
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+  -- SELF: the method goes to a, the object to a+1 (the first argument).
+  %H%[%OP_SELF%] = function(%F%, %ins%)
+    if not (%OPQ_SELF%) then error() end
+    local %r% = %F%.%regs%
+    local %o% = %r%[%F%.%x3%]
+    %r%[%F%.%x2% + 1] = %o%
+    %r%[%F%.%x2%] = %o%[%consts%[%F%.%x4%]]
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+  %H%[%OP_CLOSURE%] = function(%F%, %ins%)
+    if not (%OPQ_CLOSURE%) then error() end
+    %F%.%regs%[%F%.%x2%] = %mkClosure%(%F%, %F%.%x3%)
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+  -- VARARG: b = count+1 copies that many; b = 0 copies all and sets top.
+  %H%[%OP_VARARG%] = function(%F%, %ins%)
+    if not (%OPQ_VARARG%) then error() end
+    local %r% = %F%.%regs%
+    local %vav% = %F%.%va%
+    local %a% = %F%.%x2%
+    if %F%.%x3% == 0 then
+      local %n% = %vav% and %vav%.n or 0
+      for %j% = 1, %n% do %r%[%a% + %j% - 1] = %vav%[%j%] end
+      %F%.%top% = %n%
+    else
+      for %j% = 1, %F%.%x3% - 1 do
+        local %vv% = nil
+        if %vav% then %vv% = %vav%[%j%] end
+        %r%[%a% + %j% - 1] = %vv%
+      end
+    end
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+  -- CALL: fn = r[a], args = r[a+1 .. a+b-1]; results to r[a ..] (c-1 of them,
+  -- or all with the count in top when c = 0).
+  %H%[%OP_CALL%] = function(%F%, %ins%)
+    if not (%OPQ_CALL%) then error() end
+    local %r% = %F%.%regs%
+    local %a% = %F%.%x2%
+    local %fn% = %r%[%a%]
+    local %n% = %F%.%x3% - 1
+    local %args% = {}
+    for %j% = 1, %n% do %args%[%j%] = %r%[%a% + %j%] end
+    local %res% = %pack%(%fn%(%unpack%(%args%, 1, %n%)))
+    local %c% = %F%.%x4%
+    if %c% == 0 then
+      for %j% = 1, %res%.n do %r%[%a% + %j% - 1] = %res%[%j%] end
+      %F%.%top% = %res%.n
+    else
+      for %j% = 1, %c% - 1 do %r%[%a% + %j% - 1] = %res%[%j%] end
+    end
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+  -- CALLM: like CALL, but the arguments after the fixed ones come from top.
+  %H%[%OP_CALLM%] = function(%F%, %ins%)
+    if not (%OPQ_CALLM%) then error() end
+    local %r% = %F%.%regs%
+    local %a% = %F%.%x2%
+    local %fn% = %r%[%a%]
+    local %fx% = %F%.%x3% - 1
+    local %tp% = %F%.%top%
+    local %args% = {}
+    for %j% = 1, %fx% do %args%[%j%] = %r%[%a% + %j%] end
+    for %j% = 1, %tp% do %args%[%fx% + %j%] = %r%[%a% + %fx% + %j%] end
+    local %res% = %pack%(%fn%(%unpack%(%args%, 1, %fx% + %tp%)))
+    local %c% = %F%.%x4%
+    if %c% == 0 then
+      for %j% = 1, %res%.n do %r%[%a% + %j% - 1] = %res%[%j%] end
+      %F%.%top% = %res%.n
+    else
+      for %j% = 1, %c% - 1 do %r%[%a% + %j% - 1] = %res%[%j%] end
+    end
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+  %H%[%OP_RET%] = function(%F%, %ins%)
+    if not (%OPQ_RET%) then error() end
+    local %r% = %F%.%regs%
+    local %n% = %F%.%x3% - 1
+    local %vals% = { n = %n% }
+    for %j% = 1, %n% do %vals%[%j%] = %r%[%F%.%x2% + %j% - 1] end
+    %F%.%ret% = %vals%
+    %F%.%fin% = true
+  end
+
+  %H%[%OP_RETM%] = function(%F%, %ins%)
+    if not (%OPQ_RETM%) then error() end
+    local %r% = %F%.%regs%
+    local %a% = %F%.%x2%
+    local %fx% = %F%.%x3% - 1
+    local %tp% = %F%.%top%
+    local %vals% = {}
+    for %j% = 1, %fx% do %vals%[%j%] = %r%[%a% + %j% - 1] end
+    for %j% = 1, %tp% do %vals%[%fx% + %j%] = %r%[%a% + %fx% + %j% - 1] end
+    %vals%.n = %fx% + %tp%
+    %F%.%ret% = %vals%
+    %F%.%fin% = true
+  end
+
+  %H%[%OP_JMP%] = function(%F%, %ins%)
+    if not (%OPQ_JMP%) then error() end
+    %F%.%ip% = %F%.%x2%
+  end
+
+  %H%[%OP_JF%] = function(%F%, %ins%)
+    if not (%OPQ_JF%) then error() end
+    local %v% = %F%.%regs%[%F%.%x2%]
+    if %v% ~= nil and %v% ~= false then %F%.%ip% = %F%.%ip% + 1 else %F%.%ip% = %F%.%x3% end
+  end
+
+  %H%[%OP_JT%] = function(%F%, %ins%)
+    if not (%OPQ_JT%) then error() end
+    local %v% = %F%.%regs%[%F%.%x2%]
+    if %v% ~= nil and %v% ~= false then %F%.%ip% = %F%.%x3% else %F%.%ip% = %F%.%ip% + 1 end
+  end
+
+  %H%[%OP_JNIL%] = function(%F%, %ins%)
+    if not (%OPQ_JNIL%) then error() end
+    if %F%.%regs%[%F%.%x2%] == nil then %F%.%ip% = %F%.%x3% else %F%.%ip% = %F%.%ip% + 1 end
+  end
+
+  %H%[%OP_NEWSCOPE%] = function(%F%, %ins%)
+    if not (%OPQ_NEWSCOPE%) then error() end
+    %F%.%scope% = { %varsField% = %NEWVARS%, %parentField% = %F%.%scope% }
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+  %H%[%OP_POPSCOPE%] = function(%F%, %ins%)
+    if not (%OPQ_POPSCOPE%) then error() end
+    %F%.%scope% = %F%.%scope%.%parentField%
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+  %H%[%OP_JUNK%] = function(%F%, %ins%)
+    if not (%OPQ_JUNK%) then error() end
+    %F%.%regs%[%F%.%x2%] = %consts%[%F%.%x3%]
+    %F%.%ip% = %F%.%ip% + 1
+  end
+
+%DECOY_HANDLERS%
+
   %runProto% = function(%protoIdx%, %callArgs%, %parentScope%)
     local %proto% = %protos%[%protoIdx%]
-    local %code% = %proto%.c
-
-    local %scope% = { %varsField% = {}, %parentField% = %parentScope% }
-    local %regs% = {}
+    local %F% = {
+      %code% = %proto%.c, %ip% = 1, %regs% = %NEWREGS%, %top% = 0,
+      %scope% = { %varsField% = %NEWVARS%, %parentField% = %parentScope% },
+      %va% = nil, %fin% = false, %ret% = nil, %pr% = 0,
+      %x2% = 0, %x3% = 0, %x4% = 0,
+    }
     local %params% = %proto%.p
     for %pi% = 1, #%params% do
       local %pdesc% = %params%[%pi%]
       local %pv% = %callArgs%[%pi%]
       if %pdesc%[1] == 0 then
-        %regs%[%pdesc%[2]] = %pv%
+        %F%.%regs%[%pdesc%[2]] = %pv%
       else
-        %scope%.%varsField%[%consts%[%pdesc%[2]]] = (%pv% == nil) and %NILV% or %pv%
+        %F%.%scope%.%varsField%[%consts%[%pdesc%[2]]] = (%pv% == nil) and %NILV% or %pv%
       end
     end
-    local %varargs% = nil
     if %proto%.v then
       local %nva% = (%callArgs%.n or #%callArgs%) - #%params%
       if %nva% < 0 then %nva% = 0 end
       local %va% = { n = %nva% }
       for %vi% = 1, %nva% do %va%[%vi%] = %callArgs%[#%params% + %vi%] end
-      %varargs% = %va%
+      %F%.%va% = %va%
     end
 
-    local function %lookup%(%name%)
-      local %s% = %scope%
-      while %s% do
-        if %s%.%varsField%[%name%] ~= nil then return %s% end
-        %s% = %s%.%parentField%
-      end
-      return nil
-    end
-
-    local %stack%, %sp% = {}, 0
-    local function %push%(%v%) %sp% = %sp% + 1; %stack%[%sp%] = %v% end
-    local function %pop%() local %v% = %stack%[%sp%]; %stack%[%sp%] = nil; %sp% = %sp% - 1; return %v% end
-    local function %peek%() return %stack%[%sp%] end
-
-    local function %mkClosure%(%pIdx%)
-      local %capturedScope% = %scope%
-      return function(...)
-        return %runProto%(%pIdx%, %pack%(...), %capturedScope%)
-      end
-    end
-
-    local %ip% = 1
-    local %probe% = 0
     while true do
-      local %instr% = %code%[%ip%]
-      if not %instr% then return end
-      local %op% = %instr%[1]
-      %probe% = %probe% + 1
-
-      if %op% == %OP_LOADK% and %OPQ_LOADK% then
-        %push%(%consts%[%instr%[2]]); %ip% = %ip% + 1
-      elseif %op% == %OP_LOADNIL% and %OPQ_LOADNIL% then
-        %push%(nil); %ip% = %ip% + 1
-      elseif %op% == %OP_LOADTRUE% and %OPQ_LOADTRUE% then
-        %push%(true); %ip% = %ip% + 1
-      elseif %op% == %OP_LOADFALSE% and %OPQ_LOADFALSE% then
-        %push%(false); %ip% = %ip% + 1
-      elseif %op% == %OP_GETVAR% and %OPQ_GETVAR% then
-        local %nm% = %consts%[%instr%[2]]
-        local %sc% = %lookup%(%nm%)
-        if %sc% then
-          local %v% = %sc%.%varsField%[%nm%]
-          if %v% == %NILV% then %push%(nil) else %push%(%v%) end
-        else
-          %push%(_G[%nm%])
-        end
-        %ip% = %ip% + 1
-      elseif %op% == %OP_SETVAR% and %OPQ_SETVAR% then
-        local %nm% = %consts%[%instr%[2]]
-        local %v% = %pop%()
-        local %sc% = %lookup%(%nm%)
-        if %sc% then
-          %sc%.%varsField%[%nm%] = (%v% == nil) and %NILV% or %v%
-        else
-          _G[%nm%] = %v%
-        end
-        %ip% = %ip% + 1
-      elseif %op% == %OP_DECLLOCAL% and %OPQ_DECLLOCAL% then
-        local %nm% = %consts%[%instr%[2]]
-        local %v% = %pop%()
-        %scope%.%varsField%[%nm%] = (%v% == nil) and %NILV% or %v%
-        %ip% = %ip% + 1
-      elseif %op% == %OP_GETREG% and %OPQ_GETREG% then
-        %push%(%regs%[%instr%[2]]); %ip% = %ip% + 1
-      elseif %op% == %OP_SETREG% and %OPQ_SETREG% then
-        %regs%[%instr%[2]] = %pop%(); %ip% = %ip% + 1
-      elseif %op% == %OP_CPLX% and %OPQ_CPLX% then
-        -- A genuinely richer instruction, used only for junk noise: it
-        -- really does compute something (not a trivial push+pop pair),
-        -- but every path through it nets to zero real stack effect, so
-        -- it's exactly as safe to splice in anywhere as any other junk.
-        local %cxN% = (%instr%[2] or 3) % 7
-        local %cxAcc% = 0
-        for %cxI% = 1, %cxN% do
-          %cxAcc% = %cxAcc% + (%cxI% * %cxI%)
-          if (%cxAcc% % 2) == 0 then %cxAcc% = %cxAcc% - %cxI% else %cxAcc% = %cxAcc% + 0 end
-        end
-        local %cxTbl% = { %cxAcc%, %instr%[3] or 0 }
-        %push%(%cxTbl%[1] + %cxTbl%[2])
-        %pop%()
-        %ip% = %ip% + 1
-      elseif %op% == %OP_NEWTABLE% and %OPQ_NEWTABLE% then
-        %push%({}); %ip% = %ip% + 1
-      elseif %op% == %OP_GETINDEX% and %OPQ_GETINDEX% then
-        local %key% = %pop%(); local %obj% = %pop%()
-        %push%(%obj%[%key%]); %ip% = %ip% + 1
-      elseif %op% == %OP_SETINDEX% and %OPQ_SETINDEX% then
-        local %val% = %pop%(); local %key% = %pop%(); local %obj% = %pop%()
-        %obj%[%key%] = %val%; %ip% = %ip% + 1
-      elseif %op% == %OP_SETLIST% and %OPQ_SETLIST% then
-        local %base% = %instr%[2]
-        local %cnt% = %pop%()
-        local %arr% = {}
-        for %ii% = %cnt%, 1, -1 do %arr%[%ii%] = %pop%() end
-        local %tbl% = %pop%()
-        for %ii% = 1, %cnt% do %tbl%[%base% + %ii%] = %arr%[%ii%] end
-        %ip% = %ip% + 1
-      elseif %op% == %OP_DUP% and %OPQ_DUP% then
-        %push%(%peek%()); %ip% = %ip% + 1
-      elseif %op% == %OP_SWAP% and %OPQ_SWAP% then
-        local %b2% = %pop%(); local %a2% = %pop%(); %push%(%b2%); %push%(%a2%); %ip% = %ip% + 1
-      elseif %op% == %OP_POP% and %OPQ_POP% then
-        for %ii% = 1, %instr%[2] do %pop%() end
-        %ip% = %ip% + 1
-      elseif %op% == %OP_BINOP% and %OPQ_BINOP% then
-        local %b3% = %pop%(); local %a3% = %pop%()
-        %push%(%BINOPS%[%instr%[2]](%a3%, %b3%))
-        %ip% = %ip% + 1
-      elseif %op% == %OP_UNOP% and %OPQ_UNOP% then
-        local %a4% = %pop%()
-        %push%(%UNOPS%[%instr%[2]](%a4%))
-        %ip% = %ip% + 1
-      elseif %op% == %OP_JMP% and %OPQ_JMP% then
-        %ip% = %instr%[2]
-      elseif %op% == %OP_JMPIFNOT% and %OPQ_JMPIFNOT% then
-        local %v2% = %pop%()
-        if %truthy%(%v2%) then %ip% = %ip% + 1 else %ip% = %instr%[2] end
-      elseif %op% == %OP_JMPIFNIL% and %OPQ_JMPIFNIL% then
-        local %v3% = %pop%()
-        if %v3% == nil then %ip% = %instr%[2] else %ip% = %ip% + 1 end
-      elseif %op% == %OP_TESTANDJMP% and %OPQ_TESTANDJMP% then
-        local %v4% = %peek%()
-        if %truthy%(%v4%) then %ip% = %ip% + 1 else %ip% = %instr%[2] end
-      elseif %op% == %OP_TESTORJMP% and %OPQ_TESTORJMP% then
-        local %v5% = %peek%()
-        if %truthy%(%v5%) then %ip% = %instr%[2] else %ip% = %ip% + 1 end
-      elseif %op% == %OP_CLOSURE% and %OPQ_CLOSURE% then
-        %push%(%mkClosure%(%instr%[2])); %ip% = %ip% + 1
-      elseif %op% == %OP_NEWSCOPE% and %OPQ_NEWSCOPE% then
-        %scope% = { %varsField% = {}, %parentField% = %scope% }; %ip% = %ip% + 1
-      elseif %op% == %OP_POPSCOPE% and %OPQ_POPSCOPE% then
-        %scope% = %scope%.%parentField%; %ip% = %ip% + 1
-      elseif %op% == %OP_VARARGONE% and %OPQ_VARARGONE% then
-        if %varargs% then %push%(%varargs%[1]) else %push%(nil) end
-        %ip% = %ip% + 1
-      elseif %op% == %OP_VARARGMULTI% and %OPQ_VARARGMULTI% then
-        local %nv% = %varargs% and %varargs%.n or 0
-        for %vj% = 1, %nv% do %push%(%varargs%[%vj%]) end
-        %push%(%nv%)
-        %ip% = %ip% + 1
-      elseif %op% == %OP_ADJUSTMULTI% and %OPQ_ADJUSTMULTI% then
-        local %wn% = %instr%[2]
-        local %cnt2% = %pop%()
-        local %arr2% = {}
-        for %ii2% = %cnt2%, 1, -1 do %arr2%[%ii2%] = %pop%() end
-        for %ii2% = 1, %wn% do
-          if %ii2% <= %cnt2% then %push%(%arr2%[%ii2%]) else %push%(nil) end
-        end
-        %ip% = %ip% + 1
-      elseif %op% == %OP_CALL% and %OPQ_CALL% then
-        local %nstatic%, %argKind%, %resMulti% = %instr%[2], %instr%[3], %instr%[4]
-        local %cargs%, %ntotal% = {}, 0
-        if %argKind% == 1 then
-          local %cnt3% = %pop%()
-          local %trail% = {}
-          for %ii3% = %cnt3%, 1, -1 do %trail%[%ii3%] = %pop%() end
-          local %fix% = {}
-          for %ii3% = %nstatic%, 1, -1 do %fix%[%ii3%] = %pop%() end
-          for %ii3% = 1, %nstatic% do %cargs%[%ii3%] = %fix%[%ii3%] end
-          for %ii3% = 1, %cnt3% do %cargs%[%nstatic% + %ii3%] = %trail%[%ii3%] end
-          %ntotal% = %nstatic% + %cnt3%
-        else
-          local %fix2% = {}
-          for %ii3% = %nstatic%, 1, -1 do %fix2%[%ii3%] = %pop%() end
-          %cargs% = %fix2%
-          %ntotal% = %nstatic%
-        end
-        local %fn% = %pop%()
-        local %results% = %pack%(%fn%(%unpack%(%cargs%, 1, %ntotal%)))
-        if %resMulti% == 1 then
-          for %ri% = 1, %results%.n do %push%(%results%[%ri%]) end
-          %push%(%results%.n)
-        else
-          %push%(%results%[1])
-        end
-        %ip% = %ip% + 1
-      elseif %op% == %OP_RETURN% and %OPQ_RETURN% then
-        local %nstatic2%, %argKind2% = %instr%[2], %instr%[3]
-        if %argKind2% == 1 then
-          local %cnt4% = %pop%()
-          local %trail2% = {}
-          for %ii4% = %cnt4%, 1, -1 do %trail2%[%ii4%] = %pop%() end
-          local %fix3% = {}
-          for %ii4% = %nstatic2%, 1, -1 do %fix3%[%ii4%] = %pop%() end
-          local %all% = {}
-          for %ii4% = 1, %nstatic2% do %all%[%ii4%] = %fix3%[%ii4%] end
-          for %ii4% = 1, %cnt4% do %all%[%nstatic2% + %ii4%] = %trail2%[%ii4%] end
-          return %unpack%(%all%, 1, %nstatic2% + %cnt4%)
-        else
-          local %vals% = {}
-          for %ii4% = %nstatic2%, 1, -1 do %vals%[%ii4%] = %pop%() end
-          return %unpack%(%vals%, 1, %nstatic2%)
-        end
-      %DECOY_BRANCHES%
-      else
-        error()
-      end
+      local %ins% = %F%.%code%[%F%.%ip%]
+      if not %ins% then return end
+      -- Step-by-step decode: this instruction's opcode and operands are
+      -- decoded now, from its own seed, immediately before it runs.
+      local %sd% = %ins%[5]
+      local %mk% = %sd% * %K_M1%
+      local %key% = (%ins%[1] - (%mk% + %K_M2%) % %K_MOD%) % %K_MOD%
+      local %h% = %H%[%key%]
+      if not %h% then error() end
+      %F%.%x2% = (%ins%[2] - (%mk% + 2 * %K_M2%) % %K_MOD%) % %K_MOD%
+      %F%.%x3% = (%ins%[3] - (%mk% + 3 * %K_M2%) % %K_MOD%) % %K_MOD%
+      %F%.%x4% = (%ins%[4] - (%mk% + 4 * %K_M2%) % %K_MOD%) % %K_MOD%
+      %F%.%pr% = (%F%.%pr% + 1) % 65536
+      %PERIODIC%
+      %ADCHECK%
+      %h%(%F%, %ins%)
+      if %F%.%fin% then return %unpack%(%F%.%ret%, 1, %F%.%ret%.n) end
     end
   end
 
@@ -964,55 +1188,99 @@ local UNOP_TOKEN_NAMES = { ["-"] = "UNM", ["not"] = "NOT", ["#"] = "LEN" }
 -- the real, always-true guards on every genuine branch). Pure
 -- analysis noise: inflates the apparent opcode count and makes a
 -- purely-structural read of the dispatch chain unreliable.
-local function genDecoyBranches(ensureName, count)
-  local push, pop, peek = ensureName("push"), ensureName("pop"), ensureName("peek")
-  local stack, sp, ip = ensureName("stack"), ensureName("sp"), ensureName("ip")
-  local consts, instr = ensureName("consts"), ensureName("instr")
-  local probe = ensureName("probe")
+local function genDecoyHandlers(ensureName, count, probeExpr, freeKey)
+  local H, F, ins = ensureName("H"), ensureName("F"), ensureName("ins")
+  local ip, regsF = ensureName("ip"), ensureName("regs")
+  local x2, x3, x4 = ensureName("x2"), ensureName("x3"), ensureName("x4")
+  local BINOPS, consts = ensureName("BINOPS"), ensureName("consts")
 
+  -- Plausible bodies over the real frame fields. They are never reachable:
+  -- their keys come from the same pool as the real opcodes but are never
+  -- assigned to one, so no encoded instruction decodes to them. Each one
+  -- is written in the same wrapper as a real handler (gate, body, ip + 1),
+  -- so a reader can't tell the two apart by shape.
   local flavors = {
     function()
-      return string.format(
-        "%s(%s(%s[1] or 0, 1)); %s = %s + 1",
-        push, "(function(a,b) return a+b end)", consts, ip, ip)
+      local dv = ensureName("dv" .. tostring(math.random(1, 99999)))
+      return string.format("local %s = %s.%s[%s.%s]; %s.%s[%s.%s] = %s", dv, F, regsF, F, x2, F, regsF, F, x2, dv)
     end,
     function()
-      return string.format(
-        "local %s = %s(); if %s then %s(%s) end; %s = %s + 1",
-        ensureName("dv" .. tostring(math.random(1, 99999))), pop, peek, push, peek, ip, ip)
+      return string.format("local r = %s.%s; r[%s.%s] = %s[%s.%s]", F, regsF, F, x2, consts, F, x4)
     end,
     function()
-      return string.format(
-        "%s(#%s + %s[2]); %s = %s + 1",
-        push, stack, instr, ip, ip)
+      local tv = ensureName("tv" .. tostring(math.random(1, 99999)))
+      return string.format("local %s = %s.%s[%s.%s] or 0; %s.%s[%s.%s] = %s * 2",
+        tv, F, regsF, F, x3, F, regsF, F, x2, tv)
     end,
-    function()
-      return string.format(
-        "local %s = %s[%s] or 0; %s(%s * 2); %s = %s + 1",
-        ensureName("tmpr" .. tostring(math.random(1, 99999))), stack, sp, push, sp, ip, ip)
+    function(key)
+      return string.format("local r = %s.%s; r[%s.%s] = %s[%d](r[%s.%s], r[%s.%s])",
+        F, regsF, F, x2, BINOPS, key, F, x3, F, x4)
     end,
   }
 
-  local branches = {}
-  for i = 1, count do
-    local decoyNum = math.random(-9999, 9999)
-    local cond = genAlwaysFalsePredicate(probe)
-    local body = flavors[math.random(1, #flavors)]()
-    branches[#branches + 1] = string.format(
-      "elseif %s == %d and %s then %s",
-      ensureName("op"), decoyNum, cond, body
-    )
+  local lines = {}
+  for _ = 1, count do
+    local key = freeKey()
+    local cond = genAlwaysFalsePredicate(probeExpr())
+    local body = flavors[math.random(1, #flavors)](key)
+    lines[#lines + 1] = string.format(
+      "%s[%d] = function(%s, %s) if not (%s) then error() end %s %s.%s = %s.%s + 1 end",
+      H, key, F, ins, cond, body, F, ip, F, ip)
   end
-  return table.concat(branches, "\n      ")
+  return table.concat(lines, "\n")
 end
 
-local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr)
+-- Handlers for the operator opcodes. Each reads its operands from the frame
+-- (a = x2 destination, b = x3, c = x4) and writes the destination register.
+local function genOpHandlers(ensureName, probeExpr, OPNUM, BINNUM, UNNUM)
+  local H, F, ins = ensureName("H"), ensureName("F"), ensureName("ins")
+  local regsF, ipF = ensureName("regs"), ensureName("ip")
+  local x2, x3, x4 = ensureName("x2"), ensureName("x3"), ensureName("x4")
+  local BINOPS, UNOPS, consts = ensureName("BINOPS"), ensureName("UNOPS"), ensureName("consts")
+  local lines = {}
+  local function handler(opnum, body)
+    local gate = genOpaquePredicate(probeExpr(), 3)
+    lines[#lines + 1] = string.format(
+      "%s[%d] = function(%s, %s) if not (%s) then error() end %s %s.%s = %s.%s + 1 end",
+      H, opnum, F, ins, gate, body, F, ipF, F, ipF)
+  end
+  for k, sym in ipairs(BINOP_SYMBOLS) do
+    local num = BINNUM[sym]
+    handler(OPNUM["BIN" .. k], string.format(
+      "local r = %s.%s; r[%s.%s] = %s[%d](r[%s.%s], r[%s.%s]);",
+      F, regsF, F, x2, BINOPS, num, F, x3, F, x4))
+    handler(OPNUM["BINK" .. k], string.format(
+      "local r = %s.%s; r[%s.%s] = %s[%d](r[%s.%s], %s[%s.%s]);",
+      F, regsF, F, x2, BINOPS, num, F, x3, consts, F, x4))
+  end
+  for k, sym in ipairs(UNOP_SYMBOLS) do
+    local num = UNNUM[sym]
+    handler(OPNUM["UN" .. k], string.format(
+      "local r = %s.%s; r[%s.%s] = %s[%d](r[%s.%s]);",
+      F, regsF, F, x2, UNOPS, num, F, x3))
+  end
+  return table.concat(lines, "\n")
+end
+
+local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDebug, KV)
   local nameCache = {}
   local function ensureName(tok)
     if not nameCache[tok] then nameCache[tok] = randomIdent() end
     return nameCache[tok]
   end
+  -- The probe counter lives on the frame, so handlers reach it as F.pr.
+  local function probeExpr()
+    return ensureName("F") .. "." .. ensureName("pr")
+  end
   return substitute(template, function(tok)
+    if tok == "ADCHECK" then
+      if not antiDebug then return "" end
+      -- Every 2048 dispatched instructions, re-probe for an attached hook.
+      -- Cheap (one modulo + one gethook call), and it catches debuggers
+      -- attached AFTER startup, which the one-shot check alone never sees.
+      return "if " .. probeExpr() .. " % 2048 == 0 and " ..
+             ensureName("adHook") .. "() then " .. ensureName("brick") .. "() end"
+    end
     if tok:sub(1, 2) == "N_" then
       local opname = tok:sub(3)
       assert(OPNUM[opname], "unknown opcode placeholder " .. tok)
@@ -1043,18 +1311,66 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr)
       -- every single opcode dispatch at runtime. Capped at 8 well
       -- below the 15-identity pool so genOpaquePredicate never has to
       -- draw more unique identities than exist.
-      local probe = ensureName("probe")
+      local probe = probeExpr()
       local depthBase = 3 + math.floor(2000 / ((totalInstr or 0) + 400))
       if depthBase > 8 then depthBase = 8 end
       return genOpaquePredicate(probe, depthBase + math.random(0, 2))
     end
-    if tok == "DECOY_BRANCHES" then
+    if tok:sub(1, 2) == "K_" then
+      return tostring(KV[tok:sub(3)])
+    end
+    if tok == "NEWREGS" then
+      if KV and KV.proxify then return "setmetatable({[0] = {}}, " .. ensureName("RMETA") .. ")" end
+      return "{}"
+    end
+    if tok == "NEWVARS" then
+      if KV and KV.proxify then return "setmetatable({[0] = {}}, " .. ensureName("VMETA") .. ")" end
+      return "{}"
+    end
+    if tok == "PROXYMETA" then
+      if not (KV and KV.proxify) then return "" end
+      -- ProxifyLocal. A proxy keeps its real storage in slot [0] (a raw key, so
+      -- it never reaches __index). Each stored value sits in a fresh box {v}, so
+      -- a register or local never holds a value directly.
+      --   RMETA: register i lives at store[(i*PA + PB) % PM]: the register number
+      --          never appears as a table key.
+      --   VMETA: captured local `name` lives at store[name].
+      local RM, VM = ensureName("RMETA"), ensureName("VMETA")
+      local pt, pk, pv, pb = ensureName("pxt"), ensureName("pxk"), ensureName("pxv"), ensureName("pxb")
+      local A, B, M = tostring(KV.PA), tostring(KV.PB), tostring(KV.PM)
+      return table.concat({
+        "local " .. RM .. " = {}",
+        RM .. ".__index = function(" .. pt .. ", " .. pk .. ") local " .. pb .. " = " .. pt .. "[0][(" .. pk .. " * " .. A .. " + " .. B .. ") % " .. M .. "]; if " .. pb .. " then return " .. pb .. "[1] end return nil end",
+        RM .. ".__newindex = function(" .. pt .. ", " .. pk .. ", " .. pv .. ") " .. pt .. "[0][(" .. pk .. " * " .. A .. " + " .. B .. ") % " .. M .. "] = { " .. pv .. " } end",
+        "local " .. VM .. " = {}",
+        VM .. ".__index = function(" .. pt .. ", " .. pk .. ") local " .. pb .. " = " .. pt .. "[0][" .. pk .. "]; if " .. pb .. " then return " .. pb .. "[1] end return nil end",
+        VM .. ".__newindex = function(" .. pt .. ", " .. pk .. ", " .. pv .. ") " .. pt .. "[0][" .. pk .. "] = { " .. pv .. " } end",
+      }, "\n")
+    end
+    if tok == "PERIODIC" then
+      -- Every 4096 steps, verify one proto (rotating through them), so an
+      -- edit made after startup is caught as well.
+      local pidx = ensureName("pidx")
+      local verify = "if " .. probeExpr() .. " % 4096 == 0 then local " .. pidx .. " = (" ..
+             probeExpr() .. " / 4096) % #" .. ensureName("protos") .. " + 1; if not " ..
+             ensureName("vp") .. "(" .. pidx .. ") then " .. ensureName("brick") .. "() end end"
+      -- Decoded constants are cached in a plain table. Flush that cache now and
+      -- then, so a dump of the table sees only the constants used lately; each
+      -- one is decoded again on its next use.
+      local flush = ""
+      if KV and KV.flush then
+        flush = " if " .. probeExpr() .. " % " .. tostring(KV.flushEvery or 65536) .. " == 0 then for " ..
+                ensureName("fk") .. " in pairs(" .. ensureName("consts") .. ") do rawset(" ..
+                ensureName("consts") .. ", " .. ensureName("fk") .. ", nil) end end"
+      end
+      return verify .. flush
+    end
+    if tok == "DECOY_HANDLERS" then
       -- Scale with program size too: a big real program earns a
       -- proportionally bigger decoy dispatch chain, not just the same
       -- flat handful a one-liner gets.
-      local base = 10 + math.floor((totalInstr or 0) / 15)
-      if base > 60 then base = 60 end
-      return genDecoyBranches(ensureName, base + math.random(0, 10))
+      return genDecoyHandlers(ensureName, KV.decoyCount, probeExpr, KV.freeKey) .. "\n" ..
+             genOpHandlers(ensureName, probeExpr, OPNUM, BINNUM, UNNUM)
     end
     return ensureName(tok)
   end)
@@ -1070,6 +1386,7 @@ local HEADER_TEMPLATE = [===[
 local %byte% = string.byte
 local %char% = string.char
 local %concat% = table.concat
+__XS_STD__
 local function %bxor%(%a%, %b%)
   local %r%, %bit%, %x%, %y% = 0, 1, %a%, %b%
   while %x% > 0 or %y% > 0 do
@@ -1112,15 +1429,22 @@ local function %cfbUnchain%(%s%)
   return %concat%(%out%)
 end
 
-local function %diffuseDecrypt%(%s%)
-  local %seed% = 2166136261 % 16777216
-  for %dki% = 1, #%key% do
-    %seed% = %bxor%(%seed%, %key%[%dki%])
-    %seed% = (%seed% * 2654435 + 12345) % 16777216
+-- Key-derived LCG seed. Mirrors deriveSeed in obfuscate.lua; the constants
+-- are this build's own (see CIPHER there), not textbook values.
+local function %keySeed%()
+  local %kd% = __XS_SB__
+  for %ki% = 1, #%key% do
+    %kd% = %bxor%(%kd%, %key%[%ki%])
+    %kd% = (%kd% * __XS_LM__ + __XS_LA__) % 16777216
   end
+  return %kd%
+end
+
+local function %diffuseDecrypt%(%s%)
+  local %seed% = %keySeed%()
   local %out% = {}
   for %oi% = 1, #%s% do
-    %seed% = (%seed% * 2654435 + 12345) % 16777216
+    %seed% = (%seed% * __XS_LM__ + __XS_LA__) % 16777216
     local %lkbyte% = math.floor(%seed% / 65536) % 256
     local %lb% = %rotr8%(%byte%(%s%, %oi%), (%oi% % 5) + 1)
     %out%[%oi%] = %char%(%bxor%(%lb%, %lkbyte%))
@@ -1133,14 +1457,14 @@ local function %rc4Decrypt%(%s%)
   for %si% = 0, 255 do %S%[%si%] = %si% end
   local %sj%, %kl% = 0, #%key%
   for %si% = 0, 255 do
-    %sj% = (%sj% + %S%[%si%] + %key%[(%si% % %kl%) + 1]) % 256
+    %sj% = (%sj% * __XS_RM__ + %S%[%si%] + %key%[(%si% % %kl%) + 1]) % 256
     %S%[%si%], %S%[%sj%] = %S%[%sj%], %S%[%si%]
   end
   local %ri%, %rj% = 0, 0
   local %out% = {}
   for %oi% = 1, #%s% do
     %ri% = (%ri% + 1) % 256
-    %rj% = (%rj% + %S%[%ri%]) % 256
+    %rj% = (%rj% * __XS_RM__ + %S%[%ri%]) % 256
     %S%[%ri%], %S%[%rj%] = %S%[%rj%], %S%[%ri%]
     local %kbyte% = %S%[(%S%[%ri%] + %S%[%rj%]) % 256]
     %out%[%oi%] = %char%(%bxor%(%byte%(%s%, %oi%), %kbyte%))
@@ -1153,30 +1477,22 @@ end
 -- mirror of obfuscate.lua's deriveSbox/deriveBlockOrder/blockPermute
 -- -- see there for why each step is there.
 local function %spnDecrypt%(%ssIn%)
-  local %sSeed% = 2166136261 % 16777216
-  for %ski% = 1, #%key% do
-    %sSeed% = %bxor%(%sSeed%, %key%[%ski%])
-    %sSeed% = (%sSeed% * 2654435 + 12345) % 16777216
-  end
+  local %sSeed% = %keySeed%()
   local %sBox% = {}
   for %sbi% = 0, 255 do %sBox%[%sbi%] = %sbi% end
   for %sbj% = 255, 1, -1 do
-    %sSeed% = (%sSeed% * 2654435 + 12345) % 16777216
+    %sSeed% = (%sSeed% * __XS_LM__ + __XS_LA__) % 16777216
     local %sbr% = (math.floor(%sSeed% / 65536) % 256) % (%sbj% + 1)
     %sBox%[%sbj%], %sBox%[%sbr%] = %sBox%[%sbr%], %sBox%[%sbj%]
   end
   local %sInv% = {}
   for %sii% = 0, 255 do %sInv%[%sBox%[%sii%]] = %sii% end
 
-  local %bSeed% = 2166136261 % 16777216
-  for %bki% = 1, #%key% do
-    %bSeed% = %bxor%(%bSeed%, %key%[%bki%])
-    %bSeed% = (%bSeed% * 2654435 + 12345) % 16777216
-  end
-  %bSeed% = (%bSeed% * 2654435 + 12345) % 16777216
+  local %bSeed% = %keySeed%()
+  %bSeed% = (%bSeed% * __XS_LM__ + __XS_LA__) % 16777216
   local %sOrder% = { 1, 2, 3, 4, 5, 6, 7, 8 }
   for %soi% = 8, 2, -1 do
-    %bSeed% = (%bSeed% * 2654435 + 12345) % 16777216
+    %bSeed% = (%bSeed% * __XS_LM__ + __XS_LA__) % 16777216
     local %sor% = ((math.floor(%bSeed% / 65536) % 256) % %soi%) + 1
     %sOrder%[%soi%], %sOrder%[%sor%] = %sOrder%[%sor%], %sOrder%[%soi%]
   end
@@ -1225,7 +1541,7 @@ local %corrupt% = function()
   -- proto executes fails immediately, no matter where the tamper was.
   for %cpi% = 1, #%protos% do
     local %cpc% = %protos%[%cpi%].c
-    for %cpj% = 1, #%cpc% do %cpc%[%cpj%][1] = -1 end
+    for %cpj% = 1, #%cpc% do %cpc%[%cpj%][1] = nil end
   end
 end
 
@@ -1242,10 +1558,11 @@ local function %verify%()
     local %vpc% = %vpr%.c
     for %vpk% = 1, #%vpc% do
       local %vins% = %vpc%[%vpk%]
-      %mix%(%vins%[1]); %mix%(%vins%[2]); %mix%(%vins%[3]); %mix%(%vins%[4])
+      %mix%(%vins%[5]); %mix%(%vins%[1]); %mix%(%vins%[2]); %mix%(%vins%[3]); %mix%(%vins%[4])
     end
     local %vpp% = %vpr%.p
     for %vpj% = 1, #%vpp% do %mix%(%vpp%[%vpj%][1]); %mix%(%vpp%[%vpj%][2]) end
+    %mix%(%vpr%.k)
   end
   return (not __XS_ANTITAMPER_ON__) or (%h% == __XS_CHECKSUM__)
 end
@@ -1261,12 +1578,56 @@ if not %verify%() then %corrupt%() end
 -- (common in sandboxed embeddings) just skips them, no error either way.
 --------------------------------------------------------------------
 
+-- Global access, chosen once at startup:
+--  * If the real environment is writable (Lua 5.1 getfenv(0), Lua 5.3 _G,
+--    Lune), globals go straight to it, so program semantics are exactly
+--    the raw ones. The probe key is set and removed again.
+--  * If it isn't (Lute: `_G` is read-only and doesn't track assignments),
+--    writes go to a private table and reads fall back to the standard
+--    builtins read live (so a host's replacement of print is seen), then
+--    to the `_G` snapshot of host globals.
+-- Either way the names are encrypted constants, never plaintext.
+local %base% = (getfenv and getfenv(0)) or _G
+local %LIVE% = { __XS_LIVE__ }
+local %priv% = {}
+local %NILH% = {}
+local %probeKey% = tostring(%priv%)
+local %writable% = pcall(function()
+  %base%[%probeKey%] = true
+  %base%[%probeKey%] = nil
+end)
+local %GETG% = function(%k%)
+  if %writable% then return %base%[%k%] end
+  local %pv% = %priv%[%k%]
+  if %pv% ~= nil then
+    if %pv% == %NILH% then return nil end
+    return %pv%
+  end
+  local %lf% = %LIVE%[%k%]
+  if %lf% then return %lf%() end
+  return %base%[%k%]
+end
+local %SETG% = function(%k%, %v%)
+  if %writable% then %base%[%k%] = %v%
+  else %priv%[%k%] = (%v% == nil) and %NILH% or %v% end
+end
+
+local %dbgLib% = nil
 if __XS_ANTIDEBUG__ then
   local %dok%, %dlib% = pcall(function() return debug end)
-  if %dok% and %dlib% and %dlib%.gethook then
-    local %hok%, %hfn% = pcall(%dlib%.gethook)
-    if %hok% and %hfn% ~= nil then %corrupt%() end
-  end
+  if %dok% and %dlib% and %dlib%.gethook then %dbgLib% = %dlib% end
+end
+
+-- Hook probe shared by the startup check and the periodic check that
+-- runs inside the VM dispatch loop (see %ADCHECK% in VM_TEMPLATE).
+local %adHook% = function()
+  if not %dbgLib% then return false end
+  local %hok%, %hfn% = pcall(%dbgLib%.gethook)
+  return (%hok% and %hfn% ~= nil) and true or false
+end
+
+if __XS_ANTIDEBUG__ then
+  if %adHook%() then %corrupt%() end
   local %ook%, %olib% = pcall(function() return os end)
   if %ook% and %olib% and %olib%.clock then
     local %t0% = %olib%.clock()
@@ -1276,12 +1637,16 @@ if __XS_ANTIDEBUG__ then
   end
 end
 
-local %consts% = {}
-for %i2% = 1, #%raw% do
+-- Constants are decrypted on first use and cached, so a constant the
+-- program never touches is never decrypted at all.
+local %consts% = setmetatable({}, { __index = function(%ct%, %i2%)
   local %dv% = %decode%(%raw%[%i2%])
   local %tg% = %dv%:sub(1, 1)
-  if %tg% == "N" then %consts%[%i2%] = tonumber(%dv%:sub(2)) - %maskA% else %consts%[%i2%] = %dv%:sub(2) end
-end
+  local %val%
+  if %tg% == "N" then %val% = tonumber(%dv%:sub(2)) - %maskA% else %val% = %dv%:sub(2) end
+  rawset(%ct%, %i2%, %val%)
+  return %val%
+end })
 
 -- Watermark integrity: the decoded copy must gsub-match the exact
 -- expected text. This can only ever fail alongside the checksum
@@ -1301,19 +1666,14 @@ if __XS_ANTIDEBUG__ then
   -- real function. `type()` on such a proxy reports "table", never
   -- "function" -- a cheap, zero-false-positive tell, since nothing
   -- legitimate has a reason to make these anything but real functions.
-  -- The names being checked are themselves pulled from the SAME
-  -- encrypted constant pool as everything else -- never plaintext.
-  local %envIdx% = { __XS_ENVIDX__ }
-  for %eni% = 1, #%envIdx% do
-    local %enName% = %consts%[%envIdx%[%eni%]]
-    local %enok%, %enfn% = pcall(function() return _G[%enName%] end)
-    if %enok% and %enfn% ~= nil and type(%enfn%) ~= "function" then %corrupt%() end
-  end
+  -- The names checked are standard builtins; the engine already names
+  -- them in plain text, so reading them directly reveals nothing new.
+  __XS_ENVCHECK__
 end]===]
 
 local FOOTER_TEMPLATE = [===[
 if not %verify%() then %corrupt%() end
-return (%engine%)({ %consts%, %protos%, __XS_MAIN__ }, ...)]===]
+return (%engine%)({ %consts%, %protos%, __XS_MAIN__, %adHook%, %GETG%, %SETG% }, ...)]===]
 
 --------------------------------------------------------------------
 -- Minification: strips comments/leading-trailing whitespace and blank
@@ -1354,11 +1714,155 @@ local DEFAULTS = {
   ssa = true,
   luau = false,
   antiTamper = true,   -- checksum-verified payload; zero false-positive risk, on by default
+  flushConsts = true,  -- periodic flush of the decoded-constant cache (see PERIODIC)
+  flushEvery = 65536,  -- steps between flushes: a dump sees only recently used constants
   antiDebug = false,   -- debug.gethook + timing checks; real false-positive risk, opt-in
+  proxify = false,     -- ProxifyLocal: registers and captured locals live in proxy objects (slower)
+  strength = 2,        -- 1..4: scales decoy handlers and decoy constants (size vs. clutter)
 }
 
-local function obfuscate(source, chunkname, opts)
+--------------------------------------------------------------------
+-- Standard-library lookups. The generated code never names a standard
+-- library function directly: every whitelisted name (setmetatable,
+-- string.format, pcall, math.random, ...) is rewritten to an index into
+-- a table that is filled at startup. Each name is stored as bytes offset
+-- by a per-build constant, so the file has no readable `string.format`-
+-- style reference left. Names are not secret; this just removes the
+-- readable tells. The bootstrap names (string.byte, string.char,
+-- table.concat) stay literal, because the decoder needs them first.
+--------------------------------------------------------------------
+
+local STD_BARE = {
+  pairs = true, ipairs = true, next = true, select = true, type = true,
+  tonumber = true, tostring = true, error = true, pcall = true, xpcall = true,
+  setmetatable = true, getmetatable = true, rawget = true, rawset = true,
+  rawequal = true, print = true, unpack = true, os = true, debug = true,
+  string = true, table = true, math = true,
+}
+local STD_DOTTED = {
+  ["string.format"] = true, ["string.sub"] = true, ["string.rep"] = true,
+  ["string.len"] = true, ["table.remove"] = true, ["table.unpack"] = true,
+  ["math.floor"] = true, ["math.max"] = true, ["math.random"] = true,
+  ["os.clock"] = true, ["debug.gethook"] = true,
+}
+
+-- Rewrites standard-library references in `text` to `tabName[k]`, skipping
+-- string literals, comments, field names (`x.error`, `{ error = ... }`) and
+-- declarations (`local type = ...`). `list` collects the paths in order of
+-- first use; `index` maps a path to its k.
+local function rewriteStd(text, tabName, list, index)
+  local out, i, n = {}, 1, #text
+  local function prevNonSpace(pos)
+    local j = pos - 1
+    while j >= 1 and text:sub(j, j):match("%s") do j = j - 1 end
+    return j >= 1 and text:sub(j, j) or ""
+  end
+  while i <= n do
+    local c = text:sub(i, i)
+    if text:sub(i, i + 1) == "--" then
+      local eq = text:match("^%-%-%[(=*)%[", i)
+      local j
+      if eq then
+        local _, e = text:find("]" .. eq .. "]", i, true)
+        j = e or n
+      else
+        j = text:find("\n", i, true) or n
+      end
+      out[#out + 1] = text:sub(i, j); i = j + 1
+    elseif c == '"' or c == "'" then
+      local j = i + 1
+      while j <= n do
+        local d = text:sub(j, j)
+        if d == "\\" then j = j + 2
+        elseif d == c then break
+        else j = j + 1 end
+      end
+      out[#out + 1] = text:sub(i, j); i = j + 1
+    elseif text:match("^%[=*%[", i) then
+      local eq = text:match("^%[(=*)%[", i)
+      local _, e = text:find("]" .. eq .. "]", i, true)
+      local j = e or n
+      out[#out + 1] = text:sub(i, j); i = j + 1
+    elseif c:match("[%a_]") and not text:sub(i - 1, i - 1):match("[%w_]") then
+      local name = text:match("^[%a_][%w_]*", i)
+      local after = text:match("^%.([%a_][%w_]*)", i + #name)
+      local prev = prevNonSpace(i)
+      local before = text:sub(math.max(1, i - 12), i - 1)
+      local isField = prev == "." or prev == ":"
+      local isDecl = before:match("local%s+$") or before:match("function%s+$")
+      local nextTok = text:match("^%s*(.)", i + #name)
+      local isKey = nextTok == "=" and text:match("^%s*==", i + #name) == nil
+      local path
+      if not isField and not isDecl and not isKey then
+        if after and STD_DOTTED[name .. "." .. after] then
+          path = name .. "." .. after
+        elseif not after and STD_BARE[name] then
+          path = name
+        end
+      end
+      if path then
+        local k = index[path]
+        if not k then
+          list[#list + 1] = path
+          k = #list
+          index[path] = k
+        end
+        out[#out + 1] = tabName .. "[" .. k .. "]"
+        i = i + #path
+      else
+        out[#out + 1] = name
+        i = i + #name
+      end
+    else
+      out[#out + 1] = c; i = i + 1
+    end
+  end
+  return table.concat(out)
+end
+
+-- Builds the startup block that fills tabName from the collected paths.
+-- Names are stored as (byte + salt) % 256, decoded by `dec` with the
+-- header's own char/concat locals. `names` gives the local identifiers.
+-- Encodes a name as a decode call in the generated code: names.dec({...}).
+local function encName(names, salt, s)
+  local t = {}
+  for j = 1, #s do t[j] = (s:byte(j) + salt) % 256 end
+  return names.dec .. "({" .. table.concat(t, ",") .. "})"
+end
+
+local function buildStdBlock(tabName, list, names, salt)
+  local function enc(s)
+    local t = {}
+    for j = 1, #s do t[j] = (s:byte(j) + salt) % 256 end
+    return "{" .. table.concat(t, ",") .. "}"
+  end
+  local lines = {}
+  -- Root of the lookups: on Lune and some sandboxes _G is an empty table, but
+  -- getfenv(0) still reaches the globals; plain Lua has no getfenv, so _G there.
+  lines[#lines + 1] = string.format("local %s, %s = {}, (getfenv and getfenv(0)) or _G", tabName, names.G)
+  lines[#lines + 1] = string.format(
+    "local function %s(%s) local %s = {} for %s = 1, #%s do %s[%s] = %s((%s[%s] - %d) %% 256) end return %s(%s) end",
+    names.dec, names.t, names.o, names.j, names.t, names.o, names.j, names.char,
+    names.t, names.j, salt, names.concat, names.o)
+  for k, path in ipairs(list) do
+    local expr = names.G
+    for part in path:gmatch("[^%.]+") do
+      expr = expr .. "[" .. names.dec .. "(" .. enc(part) .. ")]"
+    end
+    lines[#lines + 1] = string.format("%s[%d] = %s", tabName, k, expr)
+  end
+  return table.concat(lines, " ")
+end
+
+local function obfuscateOnce(source, chunkname, opts)
   opts = opts or {}
+  setCipherParams() -- fresh cipher constants for every build (before any encryption)
+  -- A leading shebang line (`#!/usr/bin/env lute`) is skipped, the same
+  -- way the standard Lua loader skips it for files. It's blanked rather
+  -- than removed, so every later line keeps its original line number.
+  if source:sub(1, 1) == "#" then
+    source = source:gsub("^[^\n]*", "", 1)
+  end
   -- Captured BEFORE the defaults fill below, so we can tell "caller
   -- explicitly asked for this" apart from "fell through to a default"
   -- -- auto-scaling (below) only kicks in for the latter.
@@ -1413,22 +1917,40 @@ local function obfuscate(source, chunkname, opts)
     -- doesn't blow the decoy pool up past the point of diminishing
     -- returns.
     local scaled = math.floor(totalConsts * 1.5 + totalInstr / 8) + 16 + math.random(0, 24)
-    if scaled > 500 then scaled = 500 end
+    scaled = scaled * (opts.strength or 1)
+    if scaled > 500 * (opts.strength or 1) then scaled = 500 * (opts.strength or 1) end
     opts.decoyConstants = scaled
   end
 
   if opts.junkRate and opts.junkRate > 0 then Junk.inject(mod, opts.junkRate) end
+  if opts.flatten ~= false then Passes.flatten(mod, math.random, opts.strength or 1) end
   local bundle = buildBundle(mod, opts)
 
   local vmSrc = opts.minify and minifyTemplateText(VM_TEMPLATE) or VM_TEMPLATE
-  local engineSrc = renderTemplate(vmSrc, bundle.OPNUM, bundle.BINNUM, bundle.UNNUM, totalInstr)
+  -- ProxifyLocal register map: i -> (i*PA + PB) % PM. PA is odd, so the map is
+  -- a bijection on [0, PM). Chosen per build.
+  local PROXY_M = 1048576
+  local proxyA = 2 * math.random(0, 524287) + 1
+  local proxyB = math.random(0, PROXY_M - 1)
+  local engineSrc = renderTemplate(vmSrc, bundle.OPNUM, bundle.BINNUM, bundle.UNNUM, totalInstr, opts.antiDebug,
+    { M1 = bundle.saltM1, M2 = bundle.saltM2, MOD = bundle.mod, strength = opts.strength or 1,
+      proxify = opts.proxify and true or false, PA = proxyA, PB = proxyB, PM = PROXY_M,
+      freeKey = bundle.freeKey, decoyCount = bundle.decoyCount,
+      flush = opts.flushConsts and true or false, flushEvery = opts.flushEvery or 65536 })
 
   local keyLit = "{" .. table.concat(bundle.key, ",") .. "}"
   local cipherLits = {}
   for i, c in ipairs(bundle.cipherConsts) do
-    cipherLits[i] = string.format("%q", c)
+    -- %q leaves bytes >= 128 raw, which makes the file invalid UTF-8.
+    -- Escape them as 3-digit decimal escapes so the output is pure ASCII
+    -- (valid Lua 5.1 / 5.3 / Luau, and accepted by strict UTF-8 hosts).
+    cipherLits[i] = string.format("%q", c):gsub("[\128-\255]", function(ch)
+      return string.format("\\%03d", ch:byte())
+    end)
   end
   local ciphersLit = table.concat(cipherLits, ",")
+
+  -- Env-logger check: one direct read per builtin name (see the header).
   local protosLit = table.concat(bundle.protoLits, ",")
 
   -- Shared names between header and footer (consts/protos locals) must
@@ -1444,19 +1966,69 @@ local function obfuscate(source, chunkname, opts)
   local footerTpl = opts.minify and minifyTemplateText(FOOTER_TEMPLATE) or FOOTER_TEMPLATE
 
   local header = substitute(headerTpl, resolveShared)
+  -- Standard-library references: rewrite to indexes into one table that
+  -- the header fills at startup (see rewriteStd / buildStdBlock).
+  local stdTab = resolveShared("stdtab")
+  local stdList, stdIndex = {}, {}
+  local stdSalt = math.random(1, 200)
+  local stdNames = {
+    G = resolveShared("stdG"), dec = resolveShared("stdDec"), t = resolveShared("stdT"),
+    o = resolveShared("stdO"), j = resolveShared("stdJ"),
+    char = resolveShared("char"), concat = resolveShared("concat"),
+    base = resolveShared("base"),
+  }
+  header = rewriteStd(header, stdTab, stdList, stdIndex)
   header = header:gsub("__XS_KEY__", keyLit)
+  header = header:gsub("__XS_SB__", tostring(CIPHER.basis))
+  header = header:gsub("__XS_LM__", tostring(CIPHER.mult))
+  header = header:gsub("__XS_LA__", tostring(CIPHER.add))
+  header = header:gsub("__XS_RM__", tostring(CIPHER.rcMult))
   header = header:gsub("__XS_MASKA__", tostring(bundle.maskA))
   header = header:gsub("__XS_CIPHERS__", (ciphersLit:gsub("%%", "%%%%")))
   header = header:gsub("__XS_PROTOS__", (protosLit:gsub("%%", "%%%%")))
   header = header:gsub("__XS_CHECKSUM__", tostring(bundle.checksum))
   header = header:gsub("__XS_ANTITAMPER_ON__", tostring(opts.antiTamper))
   header = header:gsub("__XS_ANTIDEBUG__", tostring(opts.antiDebug))
-  header = header:gsub("__XS_ENVIDX__", table.concat(bundle.envCheckIdx, ","))
   header = header:gsub("__XS_WMIDX__", tostring(bundle.watermarkIdx))
+  -- Built here, after resolveShared exists, so the corrupt() helper is
+  -- emitted under its renamed identifier like everything else in the header.
+  -- Live getters for the standard builtins (see %LIVE% in the header).
+  -- Live getter keys are encoded. The values stay bare global reads: only a
+  -- bare identifier sees a global assigned by name on every runtime (on Lute
+  -- _G does not reflect those), so the getter must read the name directly.
+  header = header:gsub("__XS_LIVE__", function()
+    local parts, seen = {}, {}
+    local function add(name)
+      if seen[name] then return end
+      seen[name] = true
+      parts[#parts + 1] = string.format("[%s] = function() return %s end",
+        encName(stdNames, stdSalt, name), name)
+    end
+    for _, name in ipairs(ENV_CHECK_NAMES) do add(name) end
+    for _, name in ipairs(bundle.liveNames) do add(name) end
+    return table.concat(parts, ", ")
+  end)
+  header = header:gsub("__XS_ENVCHECK__", function()
+    if not opts.antiDebug then return "" end
+    local corrupt = resolveShared("corrupt")
+    local parts = {}
+    for _, name in ipairs(ENV_CHECK_NAMES) do
+      -- A bare read on purpose: it sees the live global, so a logger installed
+      -- before the protected code is caught (see the env-logger test). These
+      -- names therefore stay readable in the output.
+      parts[#parts + 1] = string.format('if type(%s) ~= "function" then %s() end', name, corrupt)
+    end
+    return table.concat(parts, " ")
+  end)
 
   local footer = substitute(footerTpl, function(tok)
     if tok == "engine" then return "(function()\n" .. engineSrc .. "\nend)()" end
     return resolveShared(tok)
+  end)
+  footer = rewriteStd(footer, stdTab, stdList, stdIndex)
+  header = header:gsub("__XS_STD__", function()
+    if #stdList == 0 then return "" end
+    return buildStdBlock(stdTab, stdList, stdNames, stdSalt)
   end)
   footer = footer:gsub("__XS_MAIN__", tostring(bundle.mainProto))
 
@@ -1467,6 +2039,31 @@ local function obfuscate(source, chunkname, opts)
   -- protos) sits at the chunk's top level at all.
   local combined = header .. "\n" .. footer
   return "return (function(...)\n" .. combined .. "\nend)(...)\n"
+end
+
+-- Public entry point. Builds the protected file and, if the result is smaller
+-- than opts.minSize (default 100000 bytes), rebuilds with a bigger `strength`
+-- (decoy handler and dead-block multiplier) until it is. Pass minSize = false
+-- to disable. Padding is dead code: it makes a single paste too large for a
+-- one-shot read, and adds no secrecy to the logic itself.
+local function obfuscate(source, chunkname, opts)
+  opts = opts or {}
+  local target = opts.minSize
+  if target == nil then target = 100000 end
+  if target == false then target = 0 end
+  local strength = opts.strength or 1
+  local out
+  -- Output size is noisy from one build to the next (decoy counts are
+  -- random), so aim 10% over the target and allow a dozen attempts.
+  for _ = 1, 12 do
+    local attempt = {}
+    for k, v in pairs(opts) do attempt[k] = v end
+    attempt.strength = strength
+    out = obfuscateOnce(source, chunkname, attempt)
+    if #out >= target then break end
+    strength = strength * math.max(1.25, 1.1 * target / #out)
+  end
+  return out
 end
 
 return { obfuscate = obfuscate }

@@ -1,9 +1,9 @@
 --------------------------------------------------------------------
--- XenonSec :: interpreter.lua (development/reference interpreter)
--- Executes the IR produced by compiler.lua directly, using canonical
--- string opcode names. Used for testing the compiler; the real
--- obfuscator (obfuscate.lua) emits a self-contained variant of this
--- same logic with randomized numeric opcodes into the output file.
+-- XenonSec :: interpreter.lua (reference interpreter)
+-- Executes register code produced by compiler.lua, with the canonical
+-- (string) opcode names. It defines the semantics the obfuscated runtime
+-- must reproduce; tests/difftest.lua compares the two. The shipped output
+-- uses randomized numeric opcodes and encoded fields instead.
 --------------------------------------------------------------------
 
 local unpack = table.unpack or unpack
@@ -21,7 +21,7 @@ local BINOPS = {
 	["/"] = function(a, b) return a / b end,
 	["%"] = function(a, b) return a % b end,
 	["^"] = function(a, b) return a ^ b end,
-	["//"] = function(a, b) return math.floor(a / b) end, -- Lua-5.1-safe: no native `//` token
+	["//"] = function(a, b) return math.floor(a / b) end,
 	[".."] = function(a, b) return a .. b end,
 	["=="] = function(a, b) return a == b end,
 	["~="] = function(a, b) return a ~= b end,
@@ -38,7 +38,25 @@ local UNOPS = {
 
 local NILV = setmetatable({}, { __tostring = function() return "<xs-nil>" end })
 
-local function runProto(mod, protoIndex, callArgs, parentScope)
+-- Lookup for a captured local: walks the cell chain. nil means "global".
+local function lookup(scope, name)
+	local s = scope
+	while s do
+		if s.vars[name] ~= nil then return s end
+		s = s.parent
+	end
+	return nil
+end
+
+local runProto
+
+local function mkClosure(mod, scope, pIdx)
+	return function(...)
+		return runProto(mod, pIdx, pack(...), scope)
+	end
+end
+
+function runProto(mod, protoIndex, callArgs, parentScope)
 	local proto = mod.protos[protoIndex]
 	local consts = mod.consts
 	local code = proto.code
@@ -57,198 +75,170 @@ local function runProto(mod, protoIndex, callArgs, parentScope)
 	end
 	local varargs = nil
 	if proto.hasVararg then
-		local n = (callArgs.n or #callArgs) - nparams
-		if n < 0 then n = 0 end
-		local va = { n = n }
-		for i = 1, n do va[i] = callArgs[nparams + i] end
-		varargs = va
+		local nva = (callArgs.n or #callArgs) - nparams
+		if nva < 0 then nva = 0 end
+		varargs = { n = nva }
+		for i = 1, nva do varargs[i] = callArgs[nparams + i] end
 	end
 
-	local function lookup(name)
-		local s = scope
-		while s do
-			if s.vars[name] ~= nil then return s end
-			s = s.parent
-		end
-		return nil
-	end
-
-	local stack, sp = {}, 0
-	local function push(v) sp = sp + 1; stack[sp] = v end
-	local function pop() local v = stack[sp]; stack[sp] = nil; sp = sp - 1; return v end
-	local function peek() return stack[sp] end
-
-	local function mkClosure(pIdx)
-		local capturedScope = scope
-		return function(...)
-			return runProto(mod, pIdx, pack(...), capturedScope)
-		end
-	end
-
+	local top = 0
 	local ip = 1
 	while true do
-		local instr = code[ip]
-		if not instr then return end
-		local op = instr.op
+		local ins = code[ip]
+		if not ins then return end
+		local op, a, b, c = ins.op, ins.a, ins.b, ins.c
 
 		if op == "LOADK" then
-			push(consts[instr.a]); ip = ip + 1
+			regs[a] = consts[b]; ip = ip + 1
 		elseif op == "LOADNIL" then
-			push(nil); ip = ip + 1
+			for i = a, a + b - 1 do regs[i] = nil end
+			ip = ip + 1
 		elseif op == "LOADTRUE" then
-			push(true); ip = ip + 1
+			regs[a] = true; ip = ip + 1
 		elseif op == "LOADFALSE" then
-			push(false); ip = ip + 1
+			regs[a] = false; ip = ip + 1
+		elseif op == "MOVE" then
+			regs[a] = regs[b]; ip = ip + 1
 		elseif op == "GETVAR" then
-			local name = consts[instr.a]
-			local s = lookup(name)
-			if s then
-				local v = s.vars[name]
-				if v == NILV then push(nil) else push(v) end
+			local nm = consts[b]
+			local sc = lookup(scope, nm)
+			if sc then
+				local v = sc.vars[nm]
+				if v == NILV then regs[a] = nil else regs[a] = v end
 			else
-				push(_G[name])
+				regs[a] = _G[nm]
 			end
 			ip = ip + 1
 		elseif op == "SETVAR" then
-			local name = consts[instr.a]
-			local v = pop()
-			local s = lookup(name)
-			if s then
-				s.vars[name] = (v == nil) and NILV or v
+			local nm = consts[b]
+			local v = regs[a]
+			local sc = lookup(scope, nm)
+			if sc then
+				sc.vars[nm] = (v == nil) and NILV or v
 			else
-				_G[name] = v
+				_G[nm] = v
 			end
 			ip = ip + 1
-		elseif op == "DECLLOCAL" then
-			local name = consts[instr.a]
-			local v = pop()
-			scope.vars[name] = (v == nil) and NILV or v
+		elseif op == "DECLCELL" then
+			local v = regs[a]
+			scope.vars[consts[b]] = (v == nil) and NILV or v
 			ip = ip + 1
-		elseif op == "GETREG" then
-			push(regs[instr.a]); ip = ip + 1
-		elseif op == "SETREG" then
-			regs[instr.a] = pop(); ip = ip + 1
 		elseif op == "NEWTABLE" then
-			push({}); ip = ip + 1
-		elseif op == "GETINDEX" then
-			local key = pop(); local obj = pop()
-			push(obj[key]); ip = ip + 1
-		elseif op == "SETINDEX" then
-			local val = pop(); local key = pop(); local obj = pop()
-			obj[key] = val; ip = ip + 1
-		elseif op == "SETLIST" then
-			local base = instr.a
-			local cnt = pop()
-			local arr = {}
-			for i = cnt, 1, -1 do arr[i] = pop() end
-			local tbl = pop()
-			for i = 1, cnt do tbl[base + i] = arr[i] end
+			regs[a] = {}; ip = ip + 1
+		elseif op == "GETIDX" then
+			regs[a] = regs[b][regs[c]]; ip = ip + 1
+		elseif op == "SETIDX" then
+			regs[a][regs[b]] = regs[c]; ip = ip + 1
+		elseif op == "GETIDXK" then
+			regs[a] = regs[b][consts[c]]; ip = ip + 1
+		elseif op == "SETIDXK" then
+			regs[a][consts[b]] = regs[c]; ip = ip + 1
+		elseif op == "SETLISTM" then
+			local t = regs[a]
+			local off = consts[c]
+			for j = 1, top do t[off + j] = regs[b + j - 1] end
 			ip = ip + 1
-		elseif op == "DUP" then
-			push(peek()); ip = ip + 1
-		elseif op == "SWAP" then
-			local b = pop(); local a = pop(); push(b); push(a); ip = ip + 1
-		elseif op == "POP" then
-			for _ = 1, instr.a do pop() end
+		elseif op == "SELF" then
+			local o = regs[b]
+			regs[a + 1] = o
+			regs[a] = o[consts[c]]
 			ip = ip + 1
-		elseif op == "BINOP" then
-			local opname = instr.a
-			local b = pop(); local a = pop()
-			push(BINOPS[opname](a, b))
-			ip = ip + 1
-		elseif op == "UNOP" then
-			local opname = instr.a
-			local a = pop()
-			push(UNOPS[opname](a))
-			ip = ip + 1
-		elseif op == "JMP" then
-			ip = instr.a
-		elseif op == "JMPIFNOT" then
-			local v = pop()
-			if truthy(v) then ip = ip + 1 else ip = instr.a end
-		elseif op == "JMPIFNIL" then
-			local v = pop()
-			if v == nil then ip = instr.a else ip = ip + 1 end
-		elseif op == "TESTANDJMP" then
-			local v = peek()
-			if truthy(v) then ip = ip + 1 else ip = instr.a end
-		elseif op == "TESTORJMP" then
-			local v = peek()
-			if truthy(v) then ip = instr.a else ip = ip + 1 end
 		elseif op == "CLOSURE" then
-			push(mkClosure(instr.a)); ip = ip + 1
+			regs[a] = mkClosure(mod, scope, b); ip = ip + 1
+		elseif op == "VARARG" then
+			if b == 0 then
+				local n = varargs and varargs.n or 0
+				for j = 1, n do regs[a + j - 1] = varargs[j] end
+				top = n
+			else
+				for j = 1, b - 1 do
+					local v = nil
+					if varargs then v = varargs[j] end
+					regs[a + j - 1] = v
+				end
+			end
+			ip = ip + 1
+		elseif op == "CALL" then
+			local fn = regs[a]
+			local n = b - 1
+			local args = {}
+			for j = 1, n do args[j] = regs[a + j] end
+			local res = pack(fn(unpack(args, 1, n)))
+			if c == 0 then
+				for j = 1, res.n do regs[a + j - 1] = res[j] end
+				top = res.n
+			else
+				for j = 1, c - 1 do regs[a + j - 1] = res[j] end
+			end
+			ip = ip + 1
+		elseif op == "CALLM" then
+			local fn = regs[a]
+			local fixed = b - 1
+			local args = {}
+			for j = 1, fixed do args[j] = regs[a + j] end
+			for j = 1, top do args[fixed + j] = regs[a + fixed + j] end
+			local res = pack(fn(unpack(args, 1, fixed + top)))
+			if c == 0 then
+				for j = 1, res.n do regs[a + j - 1] = res[j] end
+				top = res.n
+			else
+				for j = 1, c - 1 do regs[a + j - 1] = res[j] end
+			end
+			ip = ip + 1
+		elseif op == "RET" then
+			local n = b - 1
+			local vals = { n = n }
+			for j = 1, n do vals[j] = regs[a + j - 1] end
+			return unpack(vals, 1, vals.n)
+		elseif op == "RETM" then
+			local fixed = b - 1
+			local vals = {}
+			for j = 1, fixed do vals[j] = regs[a + j - 1] end
+			for j = 1, top do vals[fixed + j] = regs[a + fixed + j - 1] end
+			vals.n = fixed + top
+			return unpack(vals, 1, vals.n)
+		elseif op == "JMP" then
+			ip = a
+		elseif op == "JF" then
+			if truthy(regs[a]) then ip = ip + 1 else ip = b end
+		elseif op == "JT" then
+			if truthy(regs[a]) then ip = b else ip = ip + 1 end
+		elseif op == "JNIL" then
+			if regs[a] == nil then ip = b else ip = ip + 1 end
 		elseif op == "NEWSCOPE" then
 			scope = { vars = {}, parent = scope }; ip = ip + 1
 		elseif op == "POPSCOPE" then
 			scope = scope.parent; ip = ip + 1
-		elseif op == "VARARGONE" then
-			if varargs then push(varargs[1]) else push(nil) end
-			ip = ip + 1
-		elseif op == "VARARGMULTI" then
-			local n = varargs and varargs.n or 0
-			for i = 1, n do push(varargs[i]) end
-			push(n)
-			ip = ip + 1
-		elseif op == "ADJUSTMULTI" then
-			local n = instr.a
-			local cnt = pop()
-			local arr = {}
-			for i = cnt, 1, -1 do arr[i] = pop() end
-			for i = 1, n do
-				if i <= cnt then push(arr[i]) else push(nil) end
-			end
-			ip = ip + 1
-		elseif op == "CALL" then
-			local nstatic, argKind, resultMulti = instr.a, instr.b, instr.c
-			local args, nargsTotal = {}, 0
-			if argKind == 1 then
-				local cnt = pop()
-				local trailing = {}
-				for i = cnt, 1, -1 do trailing[i] = pop() end
-				local fixed = {}
-				for i = nstatic, 1, -1 do fixed[i] = pop() end
-				for i = 1, nstatic do args[i] = fixed[i] end
-				for i = 1, cnt do args[nstatic + i] = trailing[i] end
-				nargsTotal = nstatic + cnt
-			else
-				local fixed = {}
-				for i = nstatic, 1, -1 do fixed[i] = pop() end
-				args = fixed
-				nargsTotal = nstatic
-			end
-			local fn = pop()
-			local results = pack(fn(unpack(args, 1, nargsTotal)))
-			if resultMulti == 1 then
-				for i = 1, results.n do push(results[i]) end
-				push(results.n)
-			else
-				push(results[1])
-			end
-			ip = ip + 1
-		elseif op == "RETURN" then
-			local nstatic, argKind = instr.a, instr.b
-			if argKind == 1 then
-				local cnt = pop()
-				local trailing = {}
-				for i = cnt, 1, -1 do trailing[i] = pop() end
-				local fixed = {}
-				for i = nstatic, 1, -1 do fixed[i] = pop() end
-				local all = {}
-				for i = 1, nstatic do all[i] = fixed[i] end
-				for i = 1, cnt do all[nstatic + i] = trailing[i] end
-				return unpack(all, 1, nstatic + cnt)
-			else
-				local vals = {}
-				for i = nstatic, 1, -1 do vals[i] = pop() end
-				return unpack(vals, 1, nstatic)
-			end
+		elseif op == "JUNK" then
+			regs[a] = consts[b]; ip = ip + 1
 		else
-			error("XenonSec VM: unknown opcode '" .. tostring(op) .. "'")
+			local bi = op:match("^BINK?(%d+)$")
+			local ui = op:match("^UN(%d+)$")
+			if bi then
+				local sym = mod.binSymbols[tonumber(bi)]
+				if op:sub(1, 4) == "BINK" then
+					regs[a] = BINOPS[sym](regs[b], consts[c])
+				else
+					regs[a] = BINOPS[sym](regs[b], regs[c])
+				end
+				ip = ip + 1
+			elseif ui then
+				regs[a] = UNOPS[mod.unSymbols[tonumber(ui)]](regs[b])
+				ip = ip + 1
+			else
+				error("unknown opcode " .. tostring(op))
+			end
 		end
 	end
 end
 
+-- Operator symbol order, shared with the compiler.
+local BIN_ORDER = { "+", "-", "*", "/", "%", "^", "..", "==", "~=", "<", ">", "<=", ">=", "//" }
+local UN_ORDER = { "-", "not", "#" }
+
 local function run(mod, ...)
+	mod.binSymbols = BIN_ORDER
+	mod.unSymbols = UN_ORDER
 	return runProto(mod, mod.mainProto, pack(...), nil)
 end
 
