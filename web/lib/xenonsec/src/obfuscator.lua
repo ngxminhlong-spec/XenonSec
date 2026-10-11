@@ -1618,9 +1618,12 @@ if __XS_ANTIDEBUG__ then
   if %dok% and %dlib% and %dlib%.gethook then %dbgLib% = %dlib% end
 end
 
+__XS_ENVGUARD__
+
 -- Hook probe shared by the startup check and the periodic check that
 -- runs inside the VM dispatch loop (see %ADCHECK% in VM_TEMPLATE).
 local %adHook% = function()
+  if %envTampered%() then return true end
   if not %dbgLib% then return false end
   local %hok%, %hfn% = pcall(%dbgLib%.gethook)
   return (%hok% and %hfn% ~= nil) and true or false
@@ -1659,17 +1662,7 @@ do
   if %wmCount% ~= 1 or %wmChecked% ~= "Protected by XenonSec" then %corrupt%() end
 end
 
-if __XS_ANTIDEBUG__ then
-  -- Anti-env-logger: a common instrumentation trick is replacing a
-  -- global like `print` or `pairs` with a table carrying a `__call`
-  -- metamethod, so every call gets logged before it's forwarded to the
-  -- real function. `type()` on such a proxy reports "table", never
-  -- "function" -- a cheap, zero-false-positive tell, since nothing
-  -- legitimate has a reason to make these anything but real functions.
-  -- The names checked are standard builtins; the engine already names
-  -- them in plain text, so reading them directly reveals nothing new.
-  __XS_ENVCHECK__
-end]===]
+]===]
 
 local FOOTER_TEMPLATE = [===[
 if not %verify%() then %corrupt%() end
@@ -2008,17 +2001,68 @@ local function obfuscateOnce(source, chunkname, opts)
     for _, name in ipairs(bundle.liveNames) do add(name) end
     return table.concat(parts, ", ")
   end)
-  header = header:gsub("__XS_ENVCHECK__", function()
-    if not opts.antiDebug then return "" end
-    local corrupt = resolveShared("corrupt")
-    local parts = {}
-    for _, name in ipairs(ENV_CHECK_NAMES) do
-      -- A bare read on purpose: it sees the live global, so a logger installed
-      -- before the protected code is caught (see the env-logger test). These
-      -- names therefore stay readable in the output.
-      parts[#parts + 1] = string.format('if type(%s) ~= "function" then %s() end', name, corrupt)
+  -- Env-logger guard (see the header). Bare reads on purpose: they see the
+  -- live globals, so a logger installed before the protected code is caught.
+  -- The builtin names therefore stay readable in the output.
+  --  * startup: each builtin must be a real function, and a C function. A
+  --    logger that wraps one in a Lua closure is caught here, by debug info.
+  --  * periodic (via adHook, every 2048 instructions): the builtin must still
+  --    be the very value captured at startup, and the raw _G entry must match
+  --    the bare read. This catches a logger installed after startup.
+  -- The periodic part is identity-only so it stays cheap.
+  header = header:gsub("__XS_ENVGUARD__", function()
+    local envTampered = resolveShared("envTampered")
+    if not opts.antiDebug then
+      return "local " .. envTampered .. " = function() return false end"
     end
-    return table.concat(parts, " ")
+    local corrupt = resolveShared("corrupt")
+    local egi, edi = resolveShared("egi"), resolveShared("edi")
+    local gok, gd = resolveShared("gok"), resolveShared("gd")
+    local rg, isLua = resolveShared("rg"), resolveShared("isLua")
+    local ef, iok, inf = resolveShared("ef"), resolveShared("iok"), resolveShared("inf")
+    local sok, src = resolveShared("sok"), resolveShared("src")
+    local snap = resolveShared("envSnap")
+    local writable, base = resolveShared("writable"), resolveShared("base")
+    local out = {}
+    local function emit(s) out[#out + 1] = s end
+    emit(string.format("local %s, %s = nil, nil", egi, edi))
+    emit("do")
+    emit(string.format("  local %s, %s = pcall(function() return debug end)", gok, gd))
+    emit(string.format("  if %s and %s then %s = %s.getinfo; %s = %s.info end", gok, gd, egi, gd, edi, gd))
+    emit("end")
+    emit(string.format("local %s = rawget", rg))
+    emit(string.format("local %s = function(%s)", isLua, ef))
+    emit(string.format("  if %s then", egi))
+    emit(string.format('    local %s, %s = pcall(%s, %s, "S")', iok, inf, egi, ef))
+    emit(string.format("    if %s and %s and %s.what then return %s.what ~= \"C\" end", iok, inf, inf, inf))
+    emit("  end")
+    emit(string.format("  if %s then", edi))
+    emit(string.format('    local %s, %s = pcall(%s, %s, "s")', sok, src, edi, ef))
+    emit(string.format('    if %s and %s then return %s ~= "[C]" end', sok, src, src))
+    emit("  end")
+    emit("  return false")
+    emit("end")
+    local snapParts = {}
+    for _, name in ipairs(ENV_CHECK_NAMES) do
+      snapParts[#snapParts + 1] = string.format("%s = %s", name, name)
+    end
+    emit(string.format("local %s = { %s }", snap, table.concat(snapParts, ", ")))
+    emit("do")
+    for _, name in ipairs(ENV_CHECK_NAMES) do
+      emit(string.format('  if type(%s) ~= "function" or %s(%s) then %s() end', name, isLua, name, corrupt))
+    end
+    emit("end")
+    emit(string.format("local %s = function()", envTampered))
+    for _, name in ipairs(ENV_CHECK_NAMES) do
+      emit(string.format('  if %s ~= %s.%s or type(%s) ~= "function" then return true end', name, snap, name, name))
+      -- Some runtimes (Lune) keep builtins out of the raw _G table, so the raw
+      -- read is compared only when it finds a value.
+      emit(string.format("  if %s then local r = %s(%s, %q) if r ~= nil and r ~= %s then return true end end",
+        writable, rg, base, name, name))
+    end
+    emit("  return false")
+    emit("end")
+    return table.concat(out, "\n")
   end)
 
   local footer = substitute(footerTpl, function(tok)

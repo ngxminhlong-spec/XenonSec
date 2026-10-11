@@ -185,8 +185,8 @@
           <span><b>Minify output</b><small>Smaller file. Turn off only to debug.</small></span></label>
         <label class="opt"><input type="checkbox" id="o-proxify">
           <span><b>ProxifyLocal</b><small>Hides registers and captured locals behind proxies. Slower.</small></span></label>
-        <label class="opt"><input type="checkbox" id="o-antidebug">
-          <span><b>Anti-debug</b><small>Detects debug hooks and env loggers. Can false-positive with profilers.</small></span></label>
+        <label class="opt"><input type="checkbox" id="o-antidebug" checked>
+          <span><b>Anti-debug + env-logger guard</b><small>Catches debug hooks and wrapped builtins (print, pairs, ...), before and during the run. Can false-positive with profilers or with hosts that wrap print.</small></span></label>
         <label class="opt"><input type="checkbox" id="o-antitamper" checked>
           <span><b>Anti-tamper</b><small>Checksum that stops the file running if it is edited.</small></span></label>
         <label class="opt"><input type="checkbox" id="o-flush" checked>

@@ -212,23 +212,38 @@ specific program never executes) naturally have no visible effect —
 that's expected and correct, not a gap, and disappears entirely once
 the program actually exercises the affected code path.
 
-**Anti-debug** (`--antidebug`, off by default because these checks
-carry real false-positive risk against legitimate profilers/IDEs):
+**Anti-debug** (`--antidebug`, off by default in the CLI because these checks
+carry real false-positive risk against legitimate profilers/IDEs; on by default
+in the web playground):
 - A `debug.gethook()` check — normal execution never installs a hook
   on itself, so a non-nil hook is a strong signal something is
   attached.
 - A tight-loop timing check — single-stepping or breakpoints make
   trivial work take implausibly long.
-- **Anti-env-logger**: detects the common trick of replacing a global
-  like `print` or `pairs` with a table carrying a `__call`
-  metamethod so every call gets logged before being forwarded to the
-  real function. `type()` on such a proxy reports `"table"`, never
-  `"function"` — a free, zero-false-positive tell, verified against an
-  actual simulated logger-proxy attack (it was caught, and zero calls
-  ever reached the logger). The global names being checked are
-  themselves pulled from the same encrypted constant pool as
-  everything else in the file — the check itself never introduces a
-  plaintext string.
+- **Anti-env-logger guard** (the strongest part of this mode). It runs
+  in three layers:
+  1. At startup, every standard builtin the check covers (`print`,
+     `pairs`, `type`, `pcall`, `setmetatable`, `select`, `next`, ...) must
+     be a real function, and a *C* function. The C check uses
+     `debug.getinfo(f).what` where it exists and `debug.info(f, "s")`
+     otherwise, so a logger that wraps a builtin in a Lua closure is
+     caught even though `type()` still says `"function"`.
+  2. The startup values are snapshotted. Every periodic probe (every 2048
+     VM instructions, the same probe that watches for debug hooks) checks
+     that each builtin is still that exact value, so a logger installed
+     partway through a run is caught too.
+  3. Where the raw `_G` table holds the builtin, the raw entry must match
+     the bare read. This catches a logger that works through a metatable
+     on `_G`. (Lune keeps builtins out of the raw table, so this layer
+     only applies where the raw entry exists.)
+  A detected logger bricks the build through the same `corrupt()` path as
+  every other tamper check. The builtin names are read as bare globals on
+  purpose: a logger installed before the protected code must be visible
+  to the check, so those names stay readable in the output. Limits: a
+  host that replaces `print` on purpose (for its own output capture) looks
+  the same as a logger, which is the intended trade-off. A determined
+  attacker who controls the runtime can still patch the checks out; the
+  guard raises the cost and makes the common loggers fail loudly.
 
 All three routes feed the exact same "brick every opcode" reaction as
 the tamper checksum. Both `debug` and `os` may not exist in every host

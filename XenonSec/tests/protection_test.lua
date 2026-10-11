@@ -13,20 +13,13 @@ local function check(name, cond, detail)
   end
 end
 
+local Iso = dofile(TEST_DIR .. "isolate.lua")
+-- Protected code runs in its own process (see isolate.lua), so this helper
+-- never replaces print in the process that runs the protected code.
 local function run(src, opts)
   local out = Obf.obfuscate(src, "t", opts)
-  local chunk, loadErr = load(out, "t")
-  if not chunk then return nil, "LOAD_FAILED: " .. tostring(loadErr), out end
-  local captured = {}
-  local oldPrint = print
-  print = function(...)
-    local p = {}
-    for i = 1, select("#", ...) do p[i] = tostring((select(i, ...))) end
-    captured[#captured + 1] = table.concat(p, "\t")
-  end
-  local ok, err = pcall(chunk)
-  print = oldPrint
-  return ok, err, out, table.concat(captured, "\n")
+  local ok, err, captured = Iso.exec(out)
+  return ok, err, out, captured
 end
 
 --------------------------------------------------------------------

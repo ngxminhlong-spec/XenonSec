@@ -13,29 +13,22 @@ local function check(name, cond, detail)
   else print("[FAIL] " .. name .. (detail and (" -- " .. detail) or "")) end
 end
 
-local function capture(chunk)
-  local out = {}
-  local oldPrint = print
-  print = function(...)
-    local p = {}
-    for i = 1, select("#", ...) do p[i] = tostring((select(i, ...))) end
-    out[#out + 1] = table.concat(p, "\t")
-  end
-  local ok, err = pcall(chunk)
-  print = oldPrint
-  return ok, err, table.concat(out, "\n")
+local Iso = dofile(TEST_DIR .. "isolate.lua")
+-- Runs the source in its own process (see isolate.lua), so the harness never
+-- replaces print inside the process running the protected code.
+local function capture(src)
+  return Iso.exec(src)
 end
 
 local function runNative(src)
-  local chunk = assert(load(src, "native"))
-  return capture(chunk)
+  return capture(src)
 end
 
 local function runObf(src, opts)
   local out = Obf.obfuscate(src, "t", opts)
   local chunk, lerr = load(out, "t")
   if not chunk then return false, "LOAD_FAILED: " .. tostring(lerr), nil, out end
-  local ok, err, text = capture(chunk)
+  local ok, err, text = capture(out)
   return ok, err, text, out
 end
 
@@ -143,7 +136,7 @@ end
 do
   local src = 'print("hello world")\nlocal x = 40 + 2\nprint(x)\n'
   local out = Obf.obfuscate(src, "t", { proxify = true, minSize = false })
-  local ok0, _, text0 = capture(assert(load(out, "t")))
+  local ok0, _, text0 = capture(out)
   check("proxify untampered build is correct", ok0 and text0 == "hello world\n42")
   -- Flip one character inside the first numeric tuple, the same way
   -- protection_test does for the plain build.
@@ -154,7 +147,7 @@ do
     local chunk = load(bad, "t2")
     if not chunk then check("proxify tampered build fails safely (load)", true)
     else
-      local ok, _, text = capture(chunk)
+      local ok, _, text = capture(bad)
       check("proxify tampered build does not run clean", not (ok and text == "hello world\n42"),
         "tamper went unnoticed")
     end
