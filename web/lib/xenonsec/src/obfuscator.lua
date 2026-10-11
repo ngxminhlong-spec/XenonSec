@@ -1998,6 +1998,7 @@ local function obfuscateOnce(source, chunkname, opts)
         encName(stdNames, stdSalt, name), name)
     end
     for _, name in ipairs(ENV_CHECK_NAMES) do add(name) end
+    if opts.antiDebug then add("debug") end
     for _, name in ipairs(bundle.liveNames) do add(name) end
     return table.concat(parts, ", ")
   end)
@@ -2016,50 +2017,55 @@ local function obfuscateOnce(source, chunkname, opts)
       return "local " .. envTampered .. " = function() return false end"
     end
     local corrupt = resolveShared("corrupt")
+    local getg = resolveShared("GETG")
+    local pc, ty = resolveShared("pc"), resolveShared("ty")
     local egi, edi = resolveShared("egi"), resolveShared("edi")
     local gok, gd = resolveShared("gok"), resolveShared("gd")
-    local rg, isLua = resolveShared("rg"), resolveShared("isLua")
-    local ef, iok, inf = resolveShared("ef"), resolveShared("iok"), resolveShared("inf")
+    local isLua, ef = resolveShared("isLua"), resolveShared("ef")
+    local iok, inf = resolveShared("iok"), resolveShared("inf")
     local sok, src = resolveShared("sok"), resolveShared("src")
-    local snap = resolveShared("envSnap")
-    local writable, base = resolveShared("writable"), resolveShared("base")
+    local keys, snapv = resolveShared("envKeys"), resolveShared("envSnap")
+    local ii, vv = resolveShared("ei"), resolveShared("ev")
+    -- Every name the guard touches is an encoded lookup (see encName): the
+    -- source never contains a plain builtin name. The decoded strings only
+    -- exist in memory, in the KEYS table, at runtime.
     local out = {}
     local function emit(s) out[#out + 1] = s end
+    emit(string.format("local %s, %s = %s(%s), %s(%s)", pc, ty,
+      getg, encName(stdNames, stdSalt, "pcall"), getg, encName(stdNames, stdSalt, "type")))
     emit(string.format("local %s, %s = nil, nil", egi, edi))
     emit("do")
-    emit(string.format("  local %s, %s = pcall(function() return debug end)", gok, gd))
-    emit(string.format("  if %s and %s then %s = %s.getinfo; %s = %s.info end", gok, gd, egi, gd, edi, gd))
+    emit(string.format("  local %s, %s = %s(function() return %s(%s) end)", gok, gd, pc,
+      getg, encName(stdNames, stdSalt, "debug")))
+    emit(string.format("  if %s and %s then %s = %s[%s]; %s = %s[%s] end", gok, gd,
+      egi, gd, encName(stdNames, stdSalt, "getinfo"), edi, gd, encName(stdNames, stdSalt, "info")))
     emit("end")
-    emit(string.format("local %s = rawget", rg))
     emit(string.format("local %s = function(%s)", isLua, ef))
     emit(string.format("  if %s then", egi))
-    emit(string.format('    local %s, %s = pcall(%s, %s, "S")', iok, inf, egi, ef))
-    emit(string.format("    if %s and %s and %s.what then return %s.what ~= \"C\" end", iok, inf, inf, inf))
+    emit(string.format('    local %s, %s = %s(%s, %s, "S")', iok, inf, pc, egi, ef))
+    emit(string.format('    if %s and %s and %s.what then return %s.what ~= "C" end', iok, inf, inf, inf))
     emit("  end")
     emit(string.format("  if %s then", edi))
-    emit(string.format('    local %s, %s = pcall(%s, %s, "s")', sok, src, edi, ef))
+    emit(string.format('    local %s, %s = %s(%s, %s, "s")', sok, src, pc, edi, ef))
     emit(string.format('    if %s and %s then return %s ~= "[C]" end', sok, src, src))
     emit("  end")
     emit("  return false")
     emit("end")
-    local snapParts = {}
+    local keyParts = {}
     for _, name in ipairs(ENV_CHECK_NAMES) do
-      snapParts[#snapParts + 1] = string.format("%s = %s", name, name)
+      keyParts[#keyParts + 1] = encName(stdNames, stdSalt, name)
     end
-    emit(string.format("local %s = { %s }", snap, table.concat(snapParts, ", ")))
-    emit("do")
-    for _, name in ipairs(ENV_CHECK_NAMES) do
-      emit(string.format('  if type(%s) ~= "function" or %s(%s) then %s() end', name, isLua, name, corrupt))
-    end
+    emit(string.format("local %s = { %s }", keys, table.concat(keyParts, ", ")))
+    emit(string.format("local %s = {}", snapv))
+    emit(string.format("for %s = 1, #%s do %s[%s] = %s(%s[%s]) end", ii, keys, snapv, ii, getg, keys, ii))
+    emit(string.format("for %s = 1, #%s do", ii, keys))
+    emit(string.format('  local %s = %s[%s]', vv, snapv, ii))
+    emit(string.format('  if %s(%s) ~= "function" or %s(%s) then %s() end', ty, vv, isLua, vv, corrupt))
     emit("end")
     emit(string.format("local %s = function()", envTampered))
-    for _, name in ipairs(ENV_CHECK_NAMES) do
-      emit(string.format('  if %s ~= %s.%s or type(%s) ~= "function" then return true end', name, snap, name, name))
-      -- Some runtimes (Lune) keep builtins out of the raw _G table, so the raw
-      -- read is compared only when it finds a value.
-      emit(string.format("  if %s then local r = %s(%s, %q) if r ~= nil and r ~= %s then return true end end",
-        writable, rg, base, name, name))
-    end
+    emit(string.format("  for %s = 1, #%s do", ii, keys))
+    emit(string.format("    if %s(%s[%s]) ~= %s[%s] then return true end", getg, keys, ii, snapv, ii))
+    emit("  end")
     emit("  return false")
     emit("end")
     return table.concat(out, "\n")

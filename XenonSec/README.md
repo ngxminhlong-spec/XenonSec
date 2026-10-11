@@ -237,13 +237,23 @@ in the web playground):
      on `_G`. (Lune keeps builtins out of the raw table, so this layer
      only applies where the raw entry exists.)
   A detected logger bricks the build through the same `corrupt()` path as
-  every other tamper check. The builtin names are read as bare globals on
-  purpose: a logger installed before the protected code must be visible
-  to the check, so those names stay readable in the output. Limits: a
-  host that replaces `print` on purpose (for its own output capture) looks
-  the same as a logger, which is the intended trade-off. A determined
-  attacker who controls the runtime can still patch the checks out; the
-  guard raises the cost and makes the common loggers fail loudly.
+  every other tamper check.
+
+  The guard does not contain plain builtin names. Every lookup goes through
+  the same encoded-name decoder as the rest of the standard-library lookups,
+  and the `getinfo`/`info` field names are encoded too. So a dumper that reads
+  the source sees the shape of the checks but not the names they watch. The
+  decoded names exist only in memory at runtime.
+
+  Known residual: on runtimes whose `_G` is read-only (Lute), the live-getter
+  table still names the builtins. That is needed to read live globals there,
+  and it is not specific to anti-debug. On writable runtimes (Lua, Lune) the
+  guard reads only through encoded keys.
+
+  Limits: a host that replaces `print` on purpose (for its own output capture)
+  looks the same as a logger, which is the intended trade-off. A determined
+  attacker who controls the runtime can still patch the checks out; the guard
+  raises the cost and makes the common loggers fail loudly.
 
 All three routes feed the exact same "brick every opcode" reaction as
 the tamper checksum. Both `debug` and `os` may not exist in every host
