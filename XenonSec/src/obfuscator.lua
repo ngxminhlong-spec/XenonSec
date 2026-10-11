@@ -727,6 +727,8 @@ local function %run%(%mod%, ...)
     end
   end
 
+  %ENVGUARD%
+
   %PROXYMETA%
   -- Walks the cell chain for a captured local; nil means "global".
   local function %lookup%(%F%, %name%)
@@ -1273,13 +1275,19 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
     return ensureName("F") .. "." .. ensureName("pr")
   end
   return substitute(template, function(tok)
+    if tok == "ENVGUARD" then
+      if not antiDebug then return "" end
+      KV.engNames = { getg = ensureName("GETG"), react = ensureName("brick"), envT = ensureName("envT") }
+      return "__XS_EG__"
+    end
     if tok == "ADCHECK" then
       if not antiDebug then return "" end
       -- Every 2048 dispatched instructions, re-probe for an attached hook.
       -- Cheap (one modulo + one gethook call), and it catches debuggers
       -- attached AFTER startup, which the one-shot check alone never sees.
-      return "if " .. probeExpr() .. " % 2048 == 0 and " ..
-             ensureName("adHook") .. "() then " .. ensureName("brick") .. "() end"
+      return "if " .. probeExpr() .. " % 2048 == 0 and (" ..
+             ensureName("envT") .. "() or " .. ensureName("adHook") .. "()) then " ..
+             ensureName("brick") .. "() end"
     end
     if tok:sub(1, 2) == "N_" then
       local opname = tok:sub(3)
@@ -1618,12 +1626,9 @@ if __XS_ANTIDEBUG__ then
   if %dok% and %dlib% and %dlib%.gethook then %dbgLib% = %dlib% end
 end
 
-__XS_ENVGUARD__
-
 -- Hook probe shared by the startup check and the periodic check that
 -- runs inside the VM dispatch loop (see %ADCHECK% in VM_TEMPLATE).
 local %adHook% = function()
-  if %envTampered%() then return true end
   if not %dbgLib% then return false end
   local %hok%, %hfn% = pcall(%dbgLib%.gethook)
   return (%hok% and %hfn% ~= nil) and true or false
@@ -1847,6 +1852,65 @@ local function buildStdBlock(tabName, list, names, salt)
   return table.concat(lines, " ")
 end
 
+-- Env-logger guard, emitted inside the VM engine (see ENVGUARD in
+-- VM_TEMPLATE). Every builtin lookup is an encoded lookup through GETG
+-- (encName), so the source has no plain builtin names. The engine's `brick`
+-- is the reaction, and `envT` is the periodic check used by ADCHECK.
+--  * startup: each covered builtin must be a function, and a C function
+--    (debug.getinfo / debug.info). Lua-closure wrappers are caught here.
+--  * periodic: each builtin must still be the value captured at startup.
+local function buildEnvGuard(names, stdNames, stdSalt)
+  local getg, react, envT = names.getg, names.react, names.envT
+  local pc, ty = randomIdent(), randomIdent()
+  local egi, edi = randomIdent(), randomIdent()
+  local gok, gd = randomIdent(), randomIdent()
+  local isLua, ef = randomIdent(), randomIdent()
+  local iok, inf = randomIdent(), randomIdent()
+  local sok, src = randomIdent(), randomIdent()
+  local keys, snapv = randomIdent(), randomIdent()
+  local ii, vv = randomIdent(), randomIdent()
+  local out = {}
+  local function emit(line) out[#out + 1] = line end
+  emit(string.format("local %s, %s = %s(%s), %s(%s)", pc, ty,
+    getg, encName(stdNames, stdSalt, "pcall"), getg, encName(stdNames, stdSalt, "type")))
+  emit(string.format("local %s, %s = nil, nil", egi, edi))
+  emit("do")
+  emit(string.format("  local %s, %s = %s(function() return %s(%s) end)", gok, gd, pc,
+    getg, encName(stdNames, stdSalt, "debug")))
+  emit(string.format("  if %s and %s then %s = %s[%s]; %s = %s[%s] end", gok, gd,
+    egi, gd, encName(stdNames, stdSalt, "getinfo"), edi, gd, encName(stdNames, stdSalt, "info")))
+  emit("end")
+  emit(string.format("local %s = function(%s)", isLua, ef))
+  emit(string.format("  if %s then", egi))
+  emit(string.format('    local %s, %s = %s(%s, %s, "S")', iok, inf, pc, egi, ef))
+  emit(string.format('    if %s and %s and %s.what then return %s.what ~= "C" end', iok, inf, inf, inf))
+  emit("  end")
+  emit(string.format("  if %s then", edi))
+  emit(string.format('    local %s, %s = %s(%s, %s, "s")', sok, src, pc, edi, ef))
+  emit(string.format('    if %s and %s then return %s ~= "[C]" end', sok, src, src))
+  emit("  end")
+  emit("  return false")
+  emit("end")
+  local keyParts = {}
+  for _, name in ipairs(ENV_CHECK_NAMES) do
+    keyParts[#keyParts + 1] = encName(stdNames, stdSalt, name)
+  end
+  emit(string.format("local %s = { %s }", keys, table.concat(keyParts, ", ")))
+  emit(string.format("local %s = {}", snapv))
+  emit(string.format("for %s = 1, #%s do %s[%s] = %s(%s[%s]) end", ii, keys, snapv, ii, getg, keys, ii))
+  emit(string.format("for %s = 1, #%s do", ii, keys))
+  emit(string.format("  local %s = %s[%s]", vv, snapv, ii))
+  emit(string.format('  if %s(%s) ~= "function" or %s(%s) then %s() end', ty, vv, isLua, vv, react))
+  emit("end")
+  emit(string.format("local %s = function()", envT))
+  emit(string.format("  for %s = 1, #%s do", ii, keys))
+  emit(string.format("    if %s(%s[%s]) ~= %s[%s] then return true end", getg, keys, ii, snapv, ii))
+  emit("  end")
+  emit("  return false")
+  emit("end")
+  return table.concat(out, "\n")
+end
+
 local function obfuscateOnce(source, chunkname, opts)
   opts = opts or {}
   setCipherParams() -- fresh cipher constants for every build (before any encryption)
@@ -1925,11 +1989,12 @@ local function obfuscateOnce(source, chunkname, opts)
   local PROXY_M = 1048576
   local proxyA = 2 * math.random(0, 524287) + 1
   local proxyB = math.random(0, PROXY_M - 1)
+  local engineKV = { M1 = bundle.saltM1, M2 = bundle.saltM2, MOD = bundle.mod, strength = opts.strength or 1,
+    proxify = opts.proxify and true or false, PA = proxyA, PB = proxyB, PM = PROXY_M,
+    freeKey = bundle.freeKey, decoyCount = bundle.decoyCount,
+    flush = opts.flushConsts and true or false, flushEvery = opts.flushEvery or 65536 }
   local engineSrc = renderTemplate(vmSrc, bundle.OPNUM, bundle.BINNUM, bundle.UNNUM, totalInstr, opts.antiDebug,
-    { M1 = bundle.saltM1, M2 = bundle.saltM2, MOD = bundle.mod, strength = opts.strength or 1,
-      proxify = opts.proxify and true or false, PA = proxyA, PB = proxyB, PM = PROXY_M,
-      freeKey = bundle.freeKey, decoyCount = bundle.decoyCount,
-      flush = opts.flushConsts and true or false, flushEvery = opts.flushEvery or 65536 })
+    engineKV)
 
   local keyLit = "{" .. table.concat(bundle.key, ",") .. "}"
   local cipherLits = {}
@@ -2002,75 +2067,12 @@ local function obfuscateOnce(source, chunkname, opts)
     for _, name in ipairs(bundle.liveNames) do add(name) end
     return table.concat(parts, ", ")
   end)
-  -- Env-logger guard (see the header). Bare reads on purpose: they see the
-  -- live globals, so a logger installed before the protected code is caught.
-  -- The builtin names therefore stay readable in the output.
-  --  * startup: each builtin must be a real function, and a C function. A
-  --    logger that wraps one in a Lua closure is caught here, by debug info.
-  --  * periodic (via adHook, every 2048 instructions): the builtin must still
-  --    be the very value captured at startup, and the raw _G entry must match
-  --    the bare read. This catches a logger installed after startup.
-  -- The periodic part is identity-only so it stays cheap.
-  header = header:gsub("__XS_ENVGUARD__", function()
-    local envTampered = resolveShared("envTampered")
-    if not opts.antiDebug then
-      return "local " .. envTampered .. " = function() return false end"
-    end
-    local corrupt = resolveShared("corrupt")
-    local getg = resolveShared("GETG")
-    local pc, ty = resolveShared("pc"), resolveShared("ty")
-    local egi, edi = resolveShared("egi"), resolveShared("edi")
-    local gok, gd = resolveShared("gok"), resolveShared("gd")
-    local isLua, ef = resolveShared("isLua"), resolveShared("ef")
-    local iok, inf = resolveShared("iok"), resolveShared("inf")
-    local sok, src = resolveShared("sok"), resolveShared("src")
-    local keys, snapv = resolveShared("envKeys"), resolveShared("envSnap")
-    local ii, vv = resolveShared("ei"), resolveShared("ev")
-    -- Every name the guard touches is an encoded lookup (see encName): the
-    -- source never contains a plain builtin name. The decoded strings only
-    -- exist in memory, in the KEYS table, at runtime.
-    local out = {}
-    local function emit(s) out[#out + 1] = s end
-    emit(string.format("local %s, %s = %s(%s), %s(%s)", pc, ty,
-      getg, encName(stdNames, stdSalt, "pcall"), getg, encName(stdNames, stdSalt, "type")))
-    emit(string.format("local %s, %s = nil, nil", egi, edi))
-    emit("do")
-    emit(string.format("  local %s, %s = %s(function() return %s(%s) end)", gok, gd, pc,
-      getg, encName(stdNames, stdSalt, "debug")))
-    emit(string.format("  if %s and %s then %s = %s[%s]; %s = %s[%s] end", gok, gd,
-      egi, gd, encName(stdNames, stdSalt, "getinfo"), edi, gd, encName(stdNames, stdSalt, "info")))
-    emit("end")
-    emit(string.format("local %s = function(%s)", isLua, ef))
-    emit(string.format("  if %s then", egi))
-    emit(string.format('    local %s, %s = %s(%s, %s, "S")', iok, inf, pc, egi, ef))
-    emit(string.format('    if %s and %s and %s.what then return %s.what ~= "C" end', iok, inf, inf, inf))
-    emit("  end")
-    emit(string.format("  if %s then", edi))
-    emit(string.format('    local %s, %s = %s(%s, %s, "s")', sok, src, pc, edi, ef))
-    emit(string.format('    if %s and %s then return %s ~= "[C]" end', sok, src, src))
-    emit("  end")
-    emit("  return false")
-    emit("end")
-    local keyParts = {}
-    for _, name in ipairs(ENV_CHECK_NAMES) do
-      keyParts[#keyParts + 1] = encName(stdNames, stdSalt, name)
-    end
-    emit(string.format("local %s = { %s }", keys, table.concat(keyParts, ", ")))
-    emit(string.format("local %s = {}", snapv))
-    emit(string.format("for %s = 1, #%s do %s[%s] = %s(%s[%s]) end", ii, keys, snapv, ii, getg, keys, ii))
-    emit(string.format("for %s = 1, #%s do", ii, keys))
-    emit(string.format('  local %s = %s[%s]', vv, snapv, ii))
-    emit(string.format('  if %s(%s) ~= "function" or %s(%s) then %s() end', ty, vv, isLua, vv, corrupt))
-    emit("end")
-    emit(string.format("local %s = function()", envTampered))
-    emit(string.format("  for %s = 1, #%s do", ii, keys))
-    emit(string.format("    if %s(%s[%s]) ~= %s[%s] then return true end", getg, keys, ii, snapv, ii))
-    emit("  end")
-    emit("  return false")
-    emit("end")
-    return table.concat(out, "\n")
-  end)
 
+  if engineKV.engNames then
+    engineSrc = engineSrc:gsub("__XS_EG__", function()
+      return buildEnvGuard(engineKV.engNames, stdNames, stdSalt)
+    end)
+  end
   local footer = substitute(footerTpl, function(tok)
     if tok == "engine" then return "(function()\n" .. engineSrc .. "\nend)()" end
     return resolveShared(tok)

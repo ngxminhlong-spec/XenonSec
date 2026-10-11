@@ -239,7 +239,10 @@ in the web playground):
   A detected logger bricks the build through the same `corrupt()` path as
   every other tamper check.
 
-  The guard does not contain plain builtin names. Every lookup goes through
+  The guard runs inside the VM engine (after the dispatcher's `brick` is
+  defined), not in the header. Its periodic check runs from the same probe
+  that watches for debug hooks, every 2048 VM instructions. It does not
+  contain plain builtin names. Every lookup goes through
   the same encoded-name decoder as the rest of the standard-library lookups,
   and the `getinfo`/`info` field names are encoded too. So a dumper that reads
   the source sees the shape of the checks but not the names they watch. The
