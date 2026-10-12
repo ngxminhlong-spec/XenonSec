@@ -20,9 +20,14 @@ const ROOT = path.join(__dirname, "..");
 const RUNNER = path.join(ROOT, "lib", "runner.luau");
 const LIB_DIR = path.join(ROOT, "lib", "xenonsec");
 
-const MAX_BODY_BYTES = 160 * 1024;   // request body (source + options)
-const MAX_SOURCE_BYTES = 100 * 1024; // Lua source accepted
-const MAX_OUTPUT_BYTES = 4 * 1024 * 1024; // keep replies under the platform's limit
+const MAX_BODY_BYTES = 1536 * 1024;  // request body (source + options, JSON-escaped)
+const MAX_SOURCE_BYTES = 512 * 1024; // Lua source accepted
+// Output is about 14x the input (VM engine + ciphertext), so a 512 KB script
+// makes ~7.6 MB of text. The reply is therefore gzipped, and the gzipped size
+// must stay under Vercel's 4.5 MB response limit. MAX_RAW_OUTPUT_BYTES only
+// guards memory.
+const MAX_COMPRESSED_BYTES = 4 * 1024 * 1024;
+const MAX_RAW_OUTPUT_BYTES = 16 * 1024 * 1024;
 const TIMEOUT_MS = 25 * 1000;
 const MAX_CONCURRENT = 4;            // per warm instance
 
@@ -155,10 +160,11 @@ async function obfuscate({ code, options }) {
 		const started = Date.now();
 		await runLune(workDir, optsFile, inFile, outFile);
 		const output = fs.readFileSync(outFile, "utf8");
-		if (Buffer.byteLength(output, "utf8") > MAX_OUTPUT_BYTES) {
+		const bytes = Buffer.byteLength(output, "utf8");
+		if (bytes > MAX_RAW_OUTPUT_BYTES) {
 			throw new HttpError(413, "The obfuscated output is too large to return. Use a smaller script.");
 		}
-		return { output, bytes: Buffer.byteLength(output, "utf8"), ms: Date.now() - started };
+		return { output, bytes, ms: Date.now() - started };
 	} finally {
 		fs.rmSync(workDir, { recursive: true, force: true });
 	}
@@ -189,7 +195,21 @@ module.exports = async function handler(req, res) {
 		else text = await readBody(req);
 		const job = parseRequest(text);
 		const result = await obfuscate(job);
-		return send(res, 200, result);
+		const gz = zlib.gzipSync(Buffer.from(result.output, "utf8"), { level: 6 });
+		if (gz.length > MAX_COMPRESSED_BYTES) {
+			throw new HttpError(413, "The obfuscated output is too large to return. Use a smaller script.");
+		}
+		// Success: the body is the gzipped Lua text itself. The browser decodes
+		// the gzip transparently. Metadata goes in headers.
+		res.statusCode = 200;
+		res.setHeader("content-type", "text/plain; charset=utf-8");
+		res.setHeader("content-encoding", "gzip");
+		res.setHeader("cache-control", "no-store");
+		res.setHeader("x-xenonsec-bytes", String(result.bytes));
+		res.setHeader("x-xenonsec-gzip", String(gz.length));
+		res.setHeader("x-xenonsec-ms", String(result.ms));
+		res.end(gz);
+		return;
 	} catch (err) {
 		if (err instanceof HttpError) return send(res, err.status, { error: err.message });
 		console.error("obfuscate failed:", err);

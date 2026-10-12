@@ -173,7 +173,7 @@
         <button type="button" class="btn ghost" id="clear-src">Clear</button>
         <input type="file" id="file" class="file-input" accept=".lua,.luau,.txt,text/plain">
       </div>
-      <p class="hint">Up to 100 KB. Your code is sent to the server only to be obfuscated and is not stored.</p>
+      <p class="hint">Up to 512 KB. Your code is sent to the server only to be obfuscated and is not stored.</p>
     </section>
 
     <section class="card" aria-labelledby="opt-h">
@@ -234,6 +234,7 @@
       <span class="count" id="out-count"></span>
     </h2>
     <textarea id="out" class="out" readonly spellcheck="false" placeholder="The obfuscated script appears here."></textarea>
+    <p class="hint" id="preview-note" hidden></p>
     <div class="row actions" style="margin-top:10px">
       <button type="button" class="btn" id="copy" disabled>Copy</button>
       <button type="button" class="btn" id="download" disabled>Download .lua</button>
@@ -294,7 +295,31 @@ print("count:", c.n, string.format("%05.1f", c.n / 2))
     $("count").textContent = n.toLocaleString() + " chars";
   }
   function fmtBytes(n) {
-    return n < 1024 ? n + " B" : (n / 1024).toFixed(1) + " KB";
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+    return (n / 1024 / 1024).toFixed(2) + " MB";
+  }
+  // The full result is kept here. The textarea shows only a preview when the
+  // output is large, because a multi-megabyte textarea is slow on phones.
+  const PREVIEW_CHARS = 200 * 1024;
+  const COPY_LIMIT_CHARS = 2 * 1024 * 1024;
+  let fullOutput = "";
+  function showOutput(text) {
+    fullOutput = text;
+    const big = text.length > PREVIEW_CHARS;
+    out.value = big ? text.slice(0, PREVIEW_CHARS) : text;
+    const note = $("preview-note");
+    if (big) {
+      note.hidden = false;
+      note.textContent = "Showing the first " + fmtBytes(PREVIEW_CHARS) + " of " + fmtBytes(text.length) +
+        ". Download the full file" + (text.length <= COPY_LIMIT_CHARS ? " or copy it." : "; copy is off for files this large.");
+    } else {
+      note.hidden = true;
+      note.textContent = "";
+    }
+    $("copy").disabled = false;
+    $("copy").title = text.length > COPY_LIMIT_CHARS ? "Too large to copy. Use Download." : "";
+    $("download").disabled = false;
   }
 
   function readOptions() {
@@ -342,19 +367,25 @@ print("count:", c.n, string.format("%05.1f", c.n / 2))
         body: JSON.stringify({ code, options: readOptions() }),
         signal: controller.signal,
       });
-      let data = null;
-      try { data = await res.json(); } catch (_) { /* non-JSON error page */ }
-      if (!res.ok || !data || typeof data.output !== "string") {
-        setErrorText((data && data.error) || ("Request failed (HTTP " + res.status + ")."));
+      if (!res.ok) {
+        // Errors are JSON: { error }. Anything else (e.g. a gateway page) is generic.
+        let message = "";
+        try { message = (JSON.parse(await res.text()) || {}).error || ""; } catch (_) { /* not JSON */ }
+        setErrorText(message || ("Request failed (HTTP " + res.status + ")."));
         return;
       }
-      out.value = data.output;
-      $("out-count").textContent = fmtBytes(data.bytes);
-      $("copy").disabled = false;
-      $("download").disabled = false;
-      const ratio = code.length ? (data.bytes / new Blob([code]).size).toFixed(1) : "–";
-      setStatus('<span class="ok">Done</span> in ' + data.ms + " ms · " + fmtBytes(data.bytes) +
-        " output · about " + ratio + "× the input size", "ok");
+      // Success: the body is the obfuscated Lua text (the browser has already
+      // decompressed the gzip). Sizes arrive in headers.
+      const text = await res.text();
+      const bytes = Number(res.headers.get("x-xenonsec-bytes")) || new Blob([text]).size;
+      const gzBytes = Number(res.headers.get("x-xenonsec-gzip")) || 0;
+      const ms = res.headers.get("x-xenonsec-ms") || "?";
+      showOutput(text);
+      $("out-count").textContent = fmtBytes(bytes);
+      const ratio = code.length ? (bytes / new Blob([code]).size).toFixed(1) : "–";
+      setStatus('<span class="ok">Done</span> in ' + ms + " ms · " + fmtBytes(bytes) +
+        " output" + (gzBytes ? " (" + fmtBytes(gzBytes) + " over the wire)" : "") +
+        " · about " + ratio + "× the input size", "ok");
       out.scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (err) {
       setErrorText(err && err.name === "AbortError"
@@ -367,7 +398,8 @@ print("count:", c.n, string.format("%05.1f", c.n / 2))
   }
 
   function copyResult() {
-    const text = out.value;
+    if (!fullOutput || fullOutput.length > COPY_LIMIT_CHARS) return;
+    const text = fullOutput;
     const done = () => { $("copy").textContent = "Copied"; setTimeout(() => $("copy").textContent = "Copy", 1600); };
     if (navigator.clipboard && window.isSecureContext) {
       navigator.clipboard.writeText(text).then(done, () => fallbackCopy(text, done));
@@ -384,7 +416,8 @@ print("count:", c.n, string.format("%05.1f", c.n / 2))
     out.blur();
   }
   function download() {
-    const blob = new Blob([out.value], { type: "text/plain;charset=utf-8" });
+    if (!fullOutput) return;
+    const blob = new Blob([fullOutput], { type: "text/plain;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = "script.xenon.lua";
@@ -403,7 +436,7 @@ print("count:", c.n, string.format("%05.1f", c.n / 2))
   $("file").addEventListener("change", (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
-    if (f.size > 100 * 1024) { setErrorText("That file is over 100 KB."); e.target.value = ""; return; }
+    if (f.size > 512 * 1024) { setErrorText("That file is over 512 KB."); e.target.value = ""; return; }
     const reader = new FileReader();
     reader.onload = () => { src.value = String(reader.result || ""); updateCount(); };
     reader.onerror = () => setErrorText("Could not read that file.");

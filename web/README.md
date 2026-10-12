@@ -15,7 +15,7 @@ Vercel function (api/obfuscate.js)
    ▼
 Lune runtime  ──►  lib/xenonsec/  (the obfuscator, unchanged)
    │
-   ▼  { output, bytes, ms }   → shown in the page, copy / download
+   ▼  gzipped Lua text + size headers → preview in the page, copy / download
 ```
 
 - **Frontend** (`public/index.html`): one file with inline CSS and JS. No
@@ -53,9 +53,10 @@ Unknown keys and out-of-range values are rejected with HTTP 400.
 
 | Limit | Value | Where |
 |---|---|---|
-| Source size | 100 KB | `MAX_SOURCE_BYTES` |
-| Request body | 160 KB | `MAX_BODY_BYTES` |
-| Output size | 4 MB | `MAX_OUTPUT_BYTES` (Vercel's response limit is 4.5 MB) |
+| Source size | 512 KB | `MAX_SOURCE_BYTES` |
+| Request body | 1.5 MB | `MAX_BODY_BYTES` |
+| Reply size (gzipped) | 4 MB | `MAX_COMPRESSED_BYTES` (Vercel's response limit is 4.5 MB) |
+| Output size (raw, memory guard) | 16 MB | `MAX_RAW_OUTPUT_BYTES` |
 | Run time | 25 s (function limit 30 s) | `TIMEOUT_MS`, `vercel.json` |
 | Concurrency | 4 jobs per warm instance | `MAX_CONCURRENT` |
 
@@ -65,7 +66,11 @@ per-user rate limit yet.
 
 ## Status codes
 
-- `200` success: `{ output, bytes, ms }`
+- `200` success: the body is the obfuscated Lua text, gzipped
+  (`content-encoding: gzip`, `content-type: text/plain`). Browsers decompress it
+  automatically. Headers carry the metadata: `x-xenonsec-bytes` (raw size),
+  `x-xenonsec-gzip` (size on the wire) and `x-xenonsec-ms` (run time).
+  Errors are still JSON: `{ "error": "..." }`.
 - `400` bad JSON, empty code, unknown or invalid option
 - `405` not POST
 - `413` source or body too large
