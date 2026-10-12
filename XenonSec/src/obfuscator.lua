@@ -1057,7 +1057,7 @@ local function %run%(%mod%, ...)
 
     while true do
       local %ins% = %F%.%code%[%F%.%ip%]
-      if not %ins% then return end
+      if not %ins% then %RFREE% return end
       -- Step-by-step decode: this instruction's opcode and operands are
       -- decoded now, from its own seed, immediately before it runs.
       local %sd% = %ins%[5]
@@ -1072,7 +1072,7 @@ local function %run%(%mod%, ...)
       %PERIODIC%
       %ADCHECK%
       %h%(%F%, %ins%)
-      if %F%.%fin% then return %unpack%(%F%.%ret%, 1, %F%.%ret%.n) end
+      if %F%.%fin% then %RFREE% return %unpack%(%F%.%ret%, 1, %F%.%ret%.n) end
     end
   end
 
@@ -1328,8 +1328,15 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       return tostring(KV[tok:sub(3)])
     end
     if tok == "NEWREGS" then
-      if KV and KV.proxify then return "setmetatable({[0] = {}}, " .. ensureName("RMETA") .. ")" end
+      -- The proxy holds only its frame id (raw key 0). The registers live in
+      -- the run's registry, keyed by that id, and are freed when the frame exits.
+      if KV and KV.proxify then return "setmetatable({[0] = " .. ensureName("NEWFID") .. "()}, " .. ensureName("RMETA") .. ")" end
       return "{}"
+    end
+    if tok == "RFREE" then
+      -- Frame exit: drop this frame's registers from the registry.
+      if not (KV and KV.proxify) then return "" end
+      return ensureName("REG") .. "[" .. ensureName("F") .. "." .. ensureName("regs") .. "[0]] = nil"
     end
     if tok == "NEWVARS" then
       if KV and KV.proxify then return "setmetatable({[0] = {}}, " .. ensureName("VMETA") .. ")" end
@@ -1337,19 +1344,34 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
     end
     if tok == "PROXYMETA" then
       if not (KV and KV.proxify) then return "" end
-      -- ProxifyLocal. A proxy keeps its real storage in slot [0] (a raw key, so
-      -- it never reaches __index). Each stored value sits in a fresh box {v}, so
-      -- a register or local never holds a value directly.
-      --   RMETA: register i lives at store[(i*PA + PB) % PM]: the register number
-      --          never appears as a table key.
-      --   VMETA: captured local `name` lives at store[name].
-      local RM, VM = ensureName("RMETA"), ensureName("VMETA")
+      -- ProxifyLocal, registry form. A run-wide registry REG maps each frame id
+      -- to that frame's register cells, so the proxy itself holds only its id.
+      -- Both metamethods reach registers through one accessor, RACC, which lives
+      -- in the VM dispatch scope with the rest of the run's state.
+      --   register i of frame f: REG[f][(i*PA + PB) % PM], boxed as {v}
+      --   captured local `name`: stored in its scope's proxy, as before. Its
+      --          lifetime follows closures, so it is not in the registry.
+      local REG, NEWFID, FIDC = ensureName("REG"), ensureName("NEWFID"), ensureName("FIDC")
+      local RACC, RM, VM = ensureName("RACC"), ensureName("RMETA"), ensureName("VMETA")
       local pt, pk, pv, pb = ensureName("pxt"), ensureName("pxk"), ensureName("pxv"), ensureName("pxb")
+      local fs, ix, set = ensureName("pxs"), ensureName("pxi"), ensureName("pxset")
       local A, B, M = tostring(KV.PA), tostring(KV.PB), tostring(KV.PM)
       return table.concat({
+        "local " .. REG .. " = {}",
+        "local " .. FIDC .. " = 0",
+        "local function " .. NEWFID .. "() " .. FIDC .. " = " .. FIDC .. " + 1; return " .. FIDC .. " end",
+        "local function " .. RACC .. "(" .. pt .. ", " .. pk .. ", " .. set .. ", " .. pv .. ")",
+        "  local " .. fs .. " = " .. REG .. "[" .. pt .. "[0]]",
+        "  if not " .. fs .. " then " .. fs .. " = {}; " .. REG .. "[" .. pt .. "[0]] = " .. fs .. " end",
+        "  local " .. ix .. " = (" .. pk .. " * " .. A .. " + " .. B .. ") % " .. M,
+        "  if " .. set .. " then " .. fs .. "[" .. ix .. "] = { " .. pv .. " }; return nil end",
+        "  local " .. pb .. " = " .. fs .. "[" .. ix .. "]",
+        "  if " .. pb .. " then return " .. pb .. "[1] end",
+        "  return nil",
+        "end",
         "local " .. RM .. " = {}",
-        RM .. ".__index = function(" .. pt .. ", " .. pk .. ") local " .. pb .. " = " .. pt .. "[0][(" .. pk .. " * " .. A .. " + " .. B .. ") % " .. M .. "]; if " .. pb .. " then return " .. pb .. "[1] end return nil end",
-        RM .. ".__newindex = function(" .. pt .. ", " .. pk .. ", " .. pv .. ") " .. pt .. "[0][(" .. pk .. " * " .. A .. " + " .. B .. ") % " .. M .. "] = { " .. pv .. " } end",
+        RM .. ".__index = function(" .. pt .. ", " .. pk .. ") return " .. RACC .. "(" .. pt .. ", " .. pk .. ", false, nil) end",
+        RM .. ".__newindex = function(" .. pt .. ", " .. pk .. ", " .. pv .. ") " .. RACC .. "(" .. pt .. ", " .. pk .. ", true, " .. pv .. ") end",
         "local " .. VM .. " = {}",
         VM .. ".__index = function(" .. pt .. ", " .. pk .. ") local " .. pb .. " = " .. pt .. "[0][" .. pk .. "]; if " .. pb .. " then return " .. pb .. "[1] end return nil end",
         VM .. ".__newindex = function(" .. pt .. ", " .. pk .. ", " .. pv .. ") " .. pt .. "[0][" .. pk .. "] = { " .. pv .. " } end",

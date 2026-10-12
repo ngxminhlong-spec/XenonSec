@@ -271,17 +271,24 @@ plain field of its scope table. A reader (human or LLM) sees
 
 With `--proxify`, both storage tables become **proxy objects**:
 
-- **Registers** (`RMETA`): the table itself stays empty except for a
-  raw slot `[0]`, which holds the real storage. Register `i` lives at
-  `store[(i * PA + PB) % 2^20]`, where `PA` (odd) and `PB` are random
-  per build. Since `PA` is odd, the map is a bijection, so no two
-  registers collide. The register number never appears as a key.
+- **Registers** (`RMETA`), registry form: the register proxy holds only
+  its frame id in a raw slot `[0]`. The real cells live in one run-wide
+  registry, `REG[frame][(i * PA + PB) % 2^20]`, where `PA` (odd) and `PB`
+  are random per build. Since `PA` is odd, the map is a bijection, so no
+  two registers collide. The register number never appears as a key.
+  Every register access goes through one accessor, `RACC`, which lives in
+  the VM dispatch scope next to the handler table. A frame's entry is
+  removed when the frame returns, so the registry does not grow with calls.
+  If a Lua error leaves a frame without returning, its entry stays until
+  the run ends.
 - **Captured locals** (`VMETA`): a captured local `name` lives at
-  `store[name]` in the scope's proxy, instead of as a plain field.
+  `store[name]` in its scope's proxy, instead of as a plain field. These
+  stay in their proxies because their lifetime follows closures, which can
+  outlive the frame that created them.
 - **Boxed values**: every stored value sits in a fresh box `{v}`, so a
   register or local never holds a value directly. Reads and writes go
-  through `__index` / `__newindex`, so a reader can't find the value by
-  looking at the table.
+  through `__index` / `__newindex`, which call `RACC`, so a reader can't
+  find the value by looking at the table.
 
 The proxy is built from the same per-build constants as the rest of
 the engine, so each build has its own layout. Nothing else in the
