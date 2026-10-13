@@ -15,6 +15,8 @@ const os = require("os");
 const path = require("path");
 const zlib = require("zlib");
 const { spawn } = require("child_process");
+const { readZip } = require("../lib/zip");
+const { linkArchive } = require("../lib/link");
 
 const ROOT = path.join(__dirname, "..");
 const RUNNER = path.join(ROOT, "lib", "runner.luau");
@@ -28,6 +30,10 @@ const MAX_SOURCE_BYTES = 512 * 1024; // Lua source accepted
 // guards memory.
 const MAX_COMPRESSED_BYTES = 4 * 1024 * 1024;
 const MAX_RAW_OUTPUT_BYTES = 16 * 1024 * 1024;
+// A .zip upload. Sent as base64 inside the JSON body, so about 1.33x its size.
+const MAX_ARCHIVE_BYTES = 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES = 256;
+const MAX_ENTRY_NAME = 256;
 const TIMEOUT_MS = 25 * 1000;
 const MAX_CONCURRENT = 4;            // per warm instance
 
@@ -99,12 +105,37 @@ function parseRequest(text) {
 	}
 	if (!data || typeof data !== "object") throw new HttpError(400, "Request body must be an object.");
 
-	const code = data.code;
-	if (typeof code !== "string" || code.trim() === "") {
-		throw new HttpError(400, "Paste some Lua code first.");
+	// Exactly one of `code` (one script) or `archive` (a .zip, base64). With an
+	// archive, `entry` names the file that runs last (default main.lua).
+	const hasCode = data.code !== undefined;
+	const hasArchive = data.archive !== undefined;
+	if (hasCode === hasArchive) {
+		throw new HttpError(400, "Send either code or archive, not both and not neither.");
 	}
-	if (Buffer.byteLength(code, "utf8") > MAX_SOURCE_BYTES) {
-		throw new HttpError(413, `Source is over ${MAX_SOURCE_BYTES / 1024} KB. Split the script or remove unused code.`);
+
+	let code = null;
+	let archive = null;
+	let entry = null;
+	if (hasCode) {
+		code = data.code;
+		if (typeof code !== "string" || code.trim() === "") {
+			throw new HttpError(400, "Paste some Lua code first.");
+		}
+		if (Buffer.byteLength(code, "utf8") > MAX_SOURCE_BYTES) {
+			throw new HttpError(413, `Source is over ${MAX_SOURCE_BYTES / 1024} KB. Split the script or remove unused code.`);
+		}
+	} else {
+		const b64 = data.archive;
+		if (typeof b64 !== "string" || b64.length === 0) throw new HttpError(400, "The archive is empty.");
+		if (!/^[A-Za-z0-9+/=\r\n]*$/.test(b64)) throw new HttpError(400, "The archive is not valid base64.");
+		archive = Buffer.from(b64, "base64");
+		if (archive.length > MAX_ARCHIVE_BYTES) {
+			throw new HttpError(413, `The .zip is over ${MAX_ARCHIVE_BYTES / 1024 / 1024} MB.`);
+		}
+		entry = data.entry === undefined || data.entry === null ? "main.lua" : data.entry;
+		if (typeof entry !== "string" || entry.length === 0 || entry.length > MAX_ENTRY_NAME) {
+			throw new HttpError(400, "entry must be the file name of the main script inside the archive.");
+		}
 	}
 
 	const rawOpts = data.options == null ? {} : data.options;
@@ -118,7 +149,28 @@ function parseRequest(text) {
 		if (!check(rawOpts[key])) throw new HttpError(400, `Invalid value for ${key}.`);
 		options[key] = rawOpts[key];
 	}
-	return { code, options };
+	return { code, archive, entry, options };
+}
+
+// Turns a .zip into one Lua source (lib/link.js). Problems with the archive are
+// the user's, so they come back as 400 with the reason.
+function linkUpload(archive, entry) {
+	let files;
+	try {
+		files = readZip(archive, { maxEntries: MAX_ARCHIVE_ENTRIES, maxUnpackedBytes: MAX_SOURCE_BYTES }).files;
+	} catch (err) {
+		throw new HttpError(400, err.message);
+	}
+	let code;
+	try {
+		code = linkArchive(files, entry);
+	} catch (err) {
+		throw new HttpError(400, err.message);
+	}
+	if (Buffer.byteLength(code, "utf8") > MAX_SOURCE_BYTES) {
+		throw new HttpError(413, `The linked source is over ${MAX_SOURCE_BYTES / 1024} KB. Split the project or remove unused code.`);
+	}
+	return code;
 }
 
 function runLune(workDir, optsFile, inFile, outFile) {
@@ -193,8 +245,9 @@ module.exports = async function handler(req, res) {
 		if (typeof req.body === "string") text = req.body;
 		else if (req.body && typeof req.body === "object") text = JSON.stringify(req.body);
 		else text = await readBody(req);
-		const job = parseRequest(text);
-		const result = await obfuscate(job);
+		const parsed = parseRequest(text);
+		const code = parsed.archive ? linkUpload(parsed.archive, parsed.entry) : parsed.code;
+		const result = await obfuscate({ code, options: parsed.options });
 		const gz = zlib.gzipSync(Buffer.from(result.output, "utf8"), { level: 6 });
 		if (gz.length > MAX_COMPRESSED_BYTES) {
 			throw new HttpError(413, "The obfuscated output is too large to return. Use a smaller script.");

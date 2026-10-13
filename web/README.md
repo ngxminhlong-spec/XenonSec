@@ -49,11 +49,40 @@ Lune runtime  ──►  lib/xenonsec/  (the obfuscator, unchanged)
 
 Unknown keys and out-of-range values are rejected with HTTP 400.
 
+## Zip projects
+
+Open a `.zip` of several `.lua` files (up to 1 MB) instead of pasting one
+script. The playground links them into one script first, then obfuscates that:
+
+1. The archive is read in memory (`lib/zip.js`). Only stored and deflate
+   entries are accepted. Encrypted entries, zip64, symbolic links, names with
+   `..`, absolute paths or backslashes, and more than 256 entries are refused.
+   Only `.lua` and `.luau` files are used; other files are skipped.
+2. The files are linked (`lib/link.js`). Each file becomes a module named after
+   its path (`lib/util.lua` is `lib.util`, and `require("lib/util")` also works).
+   A module runs once and its result is cached. The entry file (default
+   `main.lua`, set in the page) runs last.
+3. The linked source must still fit the 512 KB source limit, and then the
+   engine runs on it as usual.
+
+A `require` of a name that isn't in the archive fails at run time with a clear
+message. File names must use letters, digits and `_` (folders are joined with
+dots).
+
+API: send `archive` (the zip, base64) and `entry` (the entry file's path inside
+the zip) in place of `code`. Send one or the other, not both.
+
+Tests: `node --test web/test/archive_test.js` (needs `python3`, which builds the
+test zips, and `texlua` on PATH). They build real zips, check the reader's refusals, and run
+the linked output.
+
 ## Limits
 
 | Limit | Value | Where |
 |---|---|---|
-| Source size | 512 KB | `MAX_SOURCE_BYTES` |
+| Source size (after linking, for zips too) | 512 KB | `MAX_SOURCE_BYTES` |
+| Zip file size | 1 MB | `MAX_ARCHIVE_BYTES` |
+| Zip entries | 256 | `MAX_ARCHIVE_ENTRIES` |
 | Request body | 1.5 MB | `MAX_BODY_BYTES` |
 | Reply size (gzipped) | 4 MB | `MAX_COMPRESSED_BYTES` (Vercel's response limit is 4.5 MB) |
 | Output size (raw, memory guard) | 16 MB | `MAX_RAW_OUTPUT_BYTES` |
@@ -71,7 +100,7 @@ per-user rate limit yet.
   automatically. Headers carry the metadata: `x-xenonsec-bytes` (raw size),
   `x-xenonsec-gzip` (size on the wire) and `x-xenonsec-ms` (run time).
   Errors are still JSON: `{ "error": "..." }`.
-- `400` bad JSON, empty code, unknown or invalid option
+- `400` bad JSON, empty code, unknown or invalid option, a bad zip (the reason is in `error`)
 - `405` not POST
 - `413` source or body too large
 - `422` the obfuscator rejected the script (syntax error, etc.)

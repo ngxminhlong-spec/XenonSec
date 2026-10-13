@@ -112,7 +112,7 @@
   .opt:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
   .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
   .field label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
-  .field input[type=number] {
+  .field input[type=number], .field input[type=text] {
     width: 100%; font: inherit; color: var(--ink); background: var(--bg);
     border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; min-height: 44px;
   }
@@ -171,9 +171,15 @@
         <button type="button" class="btn" id="load-file">Open file</button>
         <button type="button" class="btn ghost" id="load-sample">Use sample</button>
         <button type="button" class="btn ghost" id="clear-src">Clear</button>
-        <input type="file" id="file" class="file-input" accept=".lua,.luau,.txt,text/plain">
+        <input type="file" id="file" class="file-input" accept=".lua,.luau,.txt,.zip,text/plain,application/zip">
       </div>
-      <p class="hint">Up to 512 KB. Your code is sent to the server only to be obfuscated and is not stored.</p>
+      <p class="hint">Up to 512 KB. Or open a .zip of several .lua files (up to 1 MB); they are linked into one script first. Your code is sent to the server only to be obfuscated and is not stored.</p>
+      <div class="field archive" id="archive" hidden>
+        <label for="entry">Entry file inside the zip (runs last)</label>
+        <input type="text" id="entry" value="main.lua" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <p class="hint" id="archive-info"></p>
+        <div class="row" style="margin-top:8px"><button type="button" class="btn ghost" id="drop-archive">Remove zip</button></div>
+      </div>
     </section>
 
     <section class="card" aria-labelledby="opt-h">
@@ -322,6 +328,25 @@ print("count:", c.n, string.format("%05.1f", c.n / 2))
     $("download").disabled = false;
   }
 
+  // A loaded .zip replaces the pasted text. Editing the text or using the
+  // sample removes the zip again.
+  let archive = null; // { name, size, b64 }
+  function setArchive(a) {
+    archive = a;
+    $("archive").hidden = !a;
+    if (a) {
+      $("archive-info").textContent = a.name + " (" + fmtBytes(a.size) +
+        "). Obfuscate links its .lua files into one script before protecting it.";
+    }
+  }
+  function bytesToBase64(bytes) {
+    let bin = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(bin);
+  }
+
   function readOptions() {
     const o = {
       luau: $("o-luau").checked,
@@ -351,8 +376,8 @@ print("count:", c.n, string.format("%05.1f", c.n / 2))
 
   async function obfuscate() {
     const code = src.value;
-    if (!code.trim()) {
-      setErrorText("Paste some Lua code first.");
+    if (!archive && !code.trim()) {
+      setErrorText("Paste some Lua code or open a .zip first.");
       src.focus();
       return;
     }
@@ -364,7 +389,9 @@ print("count:", c.n, string.format("%05.1f", c.n / 2))
       const res = await fetch("/api/obfuscate", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ code, options: readOptions() }),
+        body: JSON.stringify(archive
+          ? { archive: archive.b64, entry: $("entry").value.trim() || "main.lua", options: readOptions() }
+          : { code, options: readOptions() }),
         signal: controller.signal,
       });
       if (!res.ok) {
@@ -382,7 +409,8 @@ print("count:", c.n, string.format("%05.1f", c.n / 2))
       const ms = res.headers.get("x-xenonsec-ms") || "?";
       showOutput(text);
       $("out-count").textContent = fmtBytes(bytes);
-      const ratio = code.length ? (bytes / new Blob([code]).size).toFixed(1) : "–";
+      const inputSize = archive ? archive.size : new Blob([code]).size;
+      const ratio = inputSize ? (bytes / inputSize).toFixed(1) : "–";
       setStatus('<span class="ok">Done</span> in ' + ms + " ms · " + fmtBytes(bytes) +
         " output" + (gzBytes ? " (" + fmtBytes(gzBytes) + " over the wire)" : "") +
         " · about " + ratio + "× the input size", "ok");
@@ -426,22 +454,36 @@ print("count:", c.n, string.format("%05.1f", c.n / 2))
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
   }
 
-  src.addEventListener("input", updateCount);
+  src.addEventListener("input", () => { updateCount(); if (archive) setArchive(null); });
   run.addEventListener("click", obfuscate);
   $("copy").addEventListener("click", copyResult);
   $("download").addEventListener("click", download);
-  $("load-sample").addEventListener("click", () => { src.value = SAMPLE; updateCount(); src.focus(); });
-  $("clear-src").addEventListener("click", () => { src.value = ""; updateCount(); src.focus(); });
+  $("load-sample").addEventListener("click", () => { setArchive(null); src.value = SAMPLE; updateCount(); src.focus(); });
+  $("clear-src").addEventListener("click", () => { setArchive(null); src.value = ""; updateCount(); src.focus(); });
+  $("drop-archive").addEventListener("click", () => setArchive(null));
   $("load-file").addEventListener("click", () => $("file").click());
   $("file").addEventListener("change", (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
-    if (f.size > 512 * 1024) { setErrorText("That file is over 512 KB."); e.target.value = ""; return; }
+    e.target.value = "";
+    if (/\.zip$/i.test(f.name)) {
+      if (f.size > 1024 * 1024) { setErrorText("That .zip is over 1 MB."); return; }
+      const zr = new FileReader();
+      zr.onload = () => {
+        setStatus("");
+        src.value = "";
+        updateCount();
+        setArchive({ name: f.name, size: f.size, b64: bytesToBase64(new Uint8Array(zr.result)) });
+      };
+      zr.onerror = () => setErrorText("Could not read that file.");
+      zr.readAsArrayBuffer(f);
+      return;
+    }
+    if (f.size > 512 * 1024) { setErrorText("That file is over 512 KB."); return; }
     const reader = new FileReader();
-    reader.onload = () => { src.value = String(reader.result || ""); updateCount(); };
+    reader.onload = () => { setArchive(null); src.value = String(reader.result || ""); updateCount(); };
     reader.onerror = () => setErrorText("Could not read that file.");
     reader.readAsText(f);
-    e.target.value = "";
   });
   $("o-strength").addEventListener("change", () => {});
   updateCount();
