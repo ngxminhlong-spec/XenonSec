@@ -75,7 +75,7 @@ do
   local src = "local function a() return 1 end local function b(x) return x + 2 end print(a(), b(3))\n"
   local out = Obf.obfuscate(src, "t", { minSize = false })
   local _, blobs = out:gsub('b="', "")
-  local _, nonces = out:gsub(",n=%d+,b=", "")
+  local _, nonces = out:gsub(",n=%d+,i=%d+,b=", "")
   check("every proto has its own encrypted blob", blobs >= 3 and nonces == blobs,
     ("blobs=%d nonces=%d"):format(blobs, nonces))
   check("no plaintext instruction lists in the output", out:find("c={", 1, true) == nil)
@@ -112,6 +112,31 @@ do
   print = realPrint
   check("corrupted checksum stops the run mid-execution (periodic check)",
     not ok and #captured == 0, ("ok=%s printed=%d"):format(tostring(ok), #captured))
+end
+
+do
+  -- Post-startup edit of decoded code. A hook mutates the second proto's
+  -- decoded instructions right after its first decode, so only the periodic
+  -- check (which hashes the live tuples) can catch it.
+  local src = "local function f(n) local s = 0 for i = 1, n do s = s + i end return s end\n" ..
+              "local t = 0 for i = 1, 30000 do t = t + f(3) end print('done', t)\n"
+  local out = Obf.obfuscate(src, "p", { minSize = false })
+  local hooked, n = out:gsub("if not (%w+)%.c then (%w+)%.c = (%w+)%[7%]%((%w+)%) end",
+    function(a, b, mod, c)
+      return ("if not %s.c then %s.c = %s[7](%s); __XS_DEC = (__XS_DEC or 0) + 1; " ..
+              "if __XS_DEC == 2 then %s.c[1][2] = %s.c[1][2] + 1 end end"):format(a, b, mod, c, b, b)
+    end)
+  check("decode hook installed", n == 1, "hooks=" .. n)
+  __XS_DEC = nil
+  local chunk = load(hooked, "p3", "t")
+  local captured = {}
+  local realPrint = print
+  print = function(...) captured[#captured + 1] = table.concat({ ... }, "\t") end
+  local ok = pcall(chunk)
+  print = realPrint
+  check("post-startup edit of decoded code is caught", not ok and #captured == 0,
+    ("ok=%s printed=%d"):format(tostring(ok), #captured))
+  __XS_DEC = nil
 end
 
 -- Junk must never land inside a multi-result window. A CALLM with c = 0 is

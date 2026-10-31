@@ -209,12 +209,15 @@ local function %pkey%(%key%, %nn%)
 end
 
 -- Lazy proto decode, called by the engine the first time a proto runs. The
--- code blob is decrypted and unpacked into instructions of five 3-byte fields
--- each (masked opcode, a, b, c, seed). Protos that never run stay encrypted.
+-- blob is decrypted and unpacked into instructions. The decoded tuples are
+-- hashed and compared with the proto's stored hash (field i) before anything
+-- can run them; a mismatch leaves no usable opcodes.
 local function %dproto%(%pr%)
   local %pk% = %pkey%(%buildKey%(), %pr%.n)
   local %plain% = %decodeK%(%pr%.b, %pk%)
   local %code% = {}
+  local %dh% = 5381
+  local function %hm%(%n%) %dh% = (%dh% * 31 + (%n% or 0)) % 2147483647 end
   for %ci% = 1, math.floor(#%plain% / 15) do
     local %base% = (%ci% - 1) * 15
     local %f% = {}
@@ -222,7 +225,11 @@ local function %dproto%(%pr%)
       local %o% = %base% + (%fi% - 1) * 3
       %f%[%fi%] = %byte%(%plain%, %o% + 1) * 65536 + %byte%(%plain%, %o% + 2) * 256 + %byte%(%plain%, %o% + 3)
     end
+    %hm%(%f%[5]); %hm%(%f%[1]); %hm%(%f%[2]); %hm%(%f%[3]); %hm%(%f%[4])
     %code%[%ci%] = %f%
+  end
+  if %dh% ~= %pr%.i then
+    for %ci% = 1, #%code% do %code%[%ci%][1] = nil end
   end
   return %code%
 end

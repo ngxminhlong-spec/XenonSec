@@ -325,14 +325,19 @@ local function buildBundle(mod, opts)
     local psum = mixChecksum(5381, hasV)
 
     local plain = {}
+    local ih = 5381
     for _, instr in ipairs(proto.code) do
       local seed = math.random(0, MOD - 1)
       local opn = OPNUM[instr.op]
       local a = instr.a or 0
       local b = instr.b or 0
       local c = instr.c or 0
-      plain[#plain + 1] = packInstr(encodeField(opn, seed, 1), encodeField(a, seed, 2),
-                                    encodeField(b, seed, 3), encodeField(c, seed, 4), seed)
+      local eop, ea = encodeField(opn, seed, 1), encodeField(a, seed, 2)
+      local eb, ec = encodeField(b, seed, 3), encodeField(c, seed, 4)
+      plain[#plain + 1] = packInstr(eop, ea, eb, ec, seed)
+      -- Same order the runtime hashes decoded tuples: seed, op, a, b, c.
+      ih = mixChecksum(ih, seed); ih = mixChecksum(ih, eop); ih = mixChecksum(ih, ea)
+      ih = mixChecksum(ih, eb); ih = mixChecksum(ih, ec)
     end
     local blob = cipherEncrypt(table.concat(plain), deriveProtoKey(nonce))
 
@@ -356,10 +361,10 @@ local function buildBundle(mod, opts)
     end
     checksum = mixChecksum(checksum, psum)
     protoLits[#protoLits + 1] = string.format(
-      "{p={%s},v=%s,k=%d,n=%d,b=%s}",
+      "{p={%s},v=%s,k=%d,n=%d,i=%d,b=%s}",
       table.concat(paramParts, ","),
       proto.hasVararg and "true" or "false",
-      psum, nonce, luaBytes(blob)
+      psum, nonce, ih, luaBytes(blob)
     )
   end
   checksum = keyedFinal(checksum, key)
