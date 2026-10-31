@@ -6,7 +6,21 @@ XenonSec/
 ├── xenonsec.lua              # CLI entrypoint
 ├── obfuscate.lua             # Stable public API entrypoint
 ├── src/                      # Core implementation
-│   ├── obfuscator.lua        # Pipeline + VM emission
+│   ├── obfuscator.lua        # Pipeline: AST passes, then bundle + render
+│   ├── obfuscator/           # Output generation, one responsibility per file
+│   │   ├── loader.lua        # Memoized dofile() so each module loads once
+│   │   ├── util.lua          # Random identifiers, shuffles, XOR, %placeholder% substitution, minify
+│   │   ├── crypto.lua        # Constant cipher and its per-build parameters
+│   │   ├── opcodes.lua       # Opcode list, operator symbols, constant-field table
+│   │   ├── bundle.lua        # Constant pool, opcode renumbering, key vault, checksums
+│   │   ├── predicates.lua    # Opaque predicates (always-true / always-false identities)
+│   │   ├── handlers.lua      # Decoy handlers and real operator handlers
+│   │   ├── render.lua        # Renders the VM engine template
+│   │   ├── stdlib.lua        # Standard-library call renaming
+│   │   └── templates/        # Lua source templates (returned as strings)
+│   │       ├── vm.lua             # VM engine
+│   │       ├── header.lua         # Output header: key vault, constants, protos
+│   │       └── footer.lua         # Output footer: integrity check, engine call
 │   ├── lexer.lua             # Source lexer
 │   ├── parser.lua            # Lua/Luau parser
 │   ├── compiler.lua          # AST -> register bytecode (no value stack)
@@ -29,10 +43,9 @@ XenonSec/
 └── README.md
 ```
 
-The project intentionally does **not** split every helper into its own file.
-Each module above owns a distinct stage or responsibility, while the root
-entrypoints keep the command-line/API surface stable.
-
+Each module owns one stage or responsibility. The output-generation half of the
+pipeline lives in `src/obfuscator/`, so `src/obfuscator.lua` is now only the
+pipeline itself. The root entrypoints keep the command-line/API surface stable.
 
 A VM-based obfuscator for Lua 5.1 **and Luau**. It doesn't rename
 variables and scramble strings on top of your original source — it
@@ -692,5 +705,7 @@ output has to run from the file, so the reader can always see it.
 - `renamer.lua` -- static scope resolver / identifier renamer
 - `compiler.lua` -- AST to register bytecode (scope cells only for captured locals)
 - `junk.lua` -- JUNK injection (jump-target-safe, outside multi-result windows)
-- `obfuscate.lua` -- bundler: opcode/constant randomization, opaque predicates, encryption, template rendering, heavy minify, IIFE wrap
+- `obfuscator.lua` -- pipeline entry point (AST passes, then bundling and rendering)
+- `obfuscator/` -- output generation (see Project layout), including the memoized `loader.lua`
+- `obfuscate.lua` -- stable public API entry point (forwards to `src/obfuscator.lua`)
 - `xenonsec.lua` -- CLI entry point
