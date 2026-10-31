@@ -70,12 +70,15 @@ do
 end
 
 do
-  -- Default builds meet the 100 KB size target; minSize = false disables it.
+  -- Padding is opt-in: the default build is not padded, and an explicit
+  -- minSize still grows the output to its target.
   local src = "print('size check')\n"
-  local big = Obf.obfuscate(src, "t", { luau = true })
-  check("default build is at least 100000 bytes", #big >= 100000, "size=" .. #big)
+  local big = Obf.obfuscate(src, "t", { minSize = 100000 })
+  check("explicit minSize reaches 100000 bytes", #big >= 100000, "size=" .. #big)
+  local dflt = Obf.obfuscate(src, "t", {})
+  check("default build is not padded", #dflt < 100000, "size=" .. #dflt)
   local small = Obf.obfuscate(src, "t", { minSize = false })
-  check("minSize = false skips padding", #small < #big, ("small=%d big=%d"):format(#small, #big))
+  check("minSize = false skips padding", #small < 100000, ("small=%d"):format(#small))
 end
 
 do
@@ -135,6 +138,47 @@ do
     check(("junk keeps multi-result values intact (case %d, 40 layouts)"):format(ci), bad == 0,
       ("%d layouts wrong, first seed %s"):format(bad, tostring(badSeed)))
   end
+end
+
+-- Control-flow scramble: opaque edges are emitted, and the flattened program
+-- still prints exactly what the raw program prints across many layouts.
+do
+  local src = [[
+local acc = 0
+for i = 1, 12 do
+  if i % 3 == 0 then acc = acc + i elseif i % 3 == 1 then acc = acc - 1 else acc = acc * 2 % 97 end
+  if acc > 50 and i > 4 then acc = acc - 7 end
+end
+print(acc)
+]]
+  local function runCapture(mod)
+    local out = {}
+    local realPrint = print
+    local ok = pcall(function()
+      print = function(...)
+        local p = {}
+        for i = 1, select("#", ...) do p[i] = tostring((select(i, ...))) end
+        out[#out + 1] = table.concat(p, "\t")
+      end
+      require_interp(mod)
+    end)
+    print = realPrint
+    return ok, table.concat(out, "\n")
+  end
+  math.randomseed(7)
+  local rawOk, rawOut = runCapture(compileSource(src))
+  local bad, opaqueSeen, badSeed = 0, 0, nil
+  for seed = 1, 20 do
+    math.randomseed(seed)
+    local mod = compileSource(src)
+    local _, _, opaque = Passes.flatten(mod, math.random, 1)
+    opaqueSeen = opaqueSeen + (opaque or 0)
+    local ok, out = runCapture(mod)
+    if not ok or out ~= rawOut then bad = bad + 1; badSeed = badSeed or seed end
+  end
+  check("flatten output matches raw output (20 layouts)", rawOk and bad == 0,
+    ("%d layouts wrong, first seed %s"):format(bad, tostring(badSeed)))
+  check("flatten emits opaque never-taken edges", opaqueSeen > 0, "no opaque edges in 20 layouts")
 end
 
 print()

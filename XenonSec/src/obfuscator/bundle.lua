@@ -47,6 +47,57 @@ local function decoyHandlerCount(totalInstr, strength)
   return math.floor(base + math.random(0, 10) * mult)
 end
 
+-- Anti-debug names live in the encrypted constant pool, never as plaintext.
+local ANTI_NAMES = { "debug", "gethook", "getinfo", "coroutine", "running" }
+
+local function xor8(x, y)
+  local r, bit = 0, 1
+  for _ = 1, 8 do
+    if x % 2 ~= y % 2 then r = r + bit end
+    x = math.floor(x / 2); y = math.floor(y / 2); bit = bit * 2
+  end
+  return r
+end
+
+-- Key vault. Each key byte becomes three XOR shares; each share is stored at
+-- a shuffled position in one masked table, with decoy bytes filling the rest.
+-- Position k holds (share + pad(k)) mod 256 where pad(k) = (k*sm1 + sm2) mod 256.
+local function buildVault(key)
+  local n = #key
+  local sm1, sm2 = math.random(2, 250), math.random(0, 255)
+  local size = 3 * n + math.max(16, n)
+  local perm = shuffledRange(size)
+  local vault = {}
+  for p = 1, size do vault[p] = math.random(0, 255) end
+  local kmap = {}
+  local function pad(p) return (p * sm1 + sm2) % 256 end
+  for i = 1, n do
+    local a = math.random(0, 255)
+    local b = math.random(0, 255)
+    local c = xor8(xor8(key[i], a), b)
+    local shares = { a, b, c }
+    for j = 1, 3 do
+      local pos = perm[(j - 1) * n + i]
+      kmap[(j - 1) * n + i] = pos
+      vault[pos] = (shares[j] + pad(pos)) % 256
+    end
+  end
+  local vsum = 0
+  for p = 1, size do vsum = (vsum + vault[p] * (p % 7 + 1)) % 2147483647 end
+  return { vault = vault, kmap = kmap, sm1 = sm1, sm2 = sm2, vsum = vsum }
+end
+
+-- Keyed finalizer, mirroring %fin% in the header. The checksum is folded
+-- through the key, so it only matches while the key itself is intact.
+local function keyedFinal(h, k)
+  local a, b = 1, 0
+  for i = 1, #k do
+    a = (a * 131 + k[i] * 17 + i) % 1048573
+    b = (b * 29 + k[i] * (i + 3)) % 2147483647
+  end
+  return (h * (a + 1) + b) % 2147483647
+end
+
 local function buildBundle(mod, opts)
   opts = opts or {}
   local decoyCount = opts.decoyConstants or (16 + math.random(0, 24))
@@ -82,6 +133,8 @@ local function buildBundle(mod, opts)
   --       it doesn't decode back to exactly the right text, that's the
   --       same signal as any other tamper -- not a separate mechanism.
   local watermarkIdx = addConst(mod, "Protected by XenonSec")
+  local antiPre = {}
+  for _, nm in ipairs(ANTI_NAMES) do antiPre[nm] = addConst(mod, nm) end
 
   -- 1.5. Sprinkle in decoy constants: random junk strings/numbers that
   --      no instruction ever references. They shuffle in among the
@@ -134,6 +187,8 @@ local function buildBundle(mod, opts)
   end
 
   watermarkIdx = perm[watermarkIdx]
+  local antiIdx = {}
+  for nm, idx in pairs(antiPre) do antiIdx[nm] = perm[idx] end
 
 
   -- 3. Randomize opcode numbers for this build. Binary/unary operator
@@ -180,13 +235,17 @@ local function buildBundle(mod, opts)
   --    distinction, but needless fragility elsewhere).
   local key = randomByteKey(12 + math.random(0, 8))
   local maskA = math.random(-999999, 999999)
+  -- Per-build tag bytes for the constant type marks (N = number, S = string).
+  local tagPerm = shuffledRange(255)
+  local tagN, tagS = tagPerm[1], tagPerm[2]
+  local vaultData = buildVault(key)
   local cipherConsts = {}
   for i, v in ipairs(shuffledConsts) do
     local tagged
     if type(v) == "number" then
-      tagged = "N" .. tostring(v + maskA)
+      tagged = string.char(tagN) .. tostring(v + maskA)
     else
-      tagged = "S" .. v
+      tagged = string.char(tagS) .. v
     end
     cipherConsts[i] = cipherEncrypt(tagged, key)
   end
@@ -265,6 +324,7 @@ local function buildBundle(mod, opts)
       table.concat(codeParts, ",")
     )
   end
+  checksum = keyedFinal(checksum, key)
 
   return {
     cipherConsts = cipherConsts,
@@ -283,6 +343,14 @@ local function buildBundle(mod, opts)
     decoyCount = decoyCount,
     checksum = checksum,
     watermarkIdx = watermarkIdx,
+    vault = vaultData.vault,
+    kmap = vaultData.kmap,
+    sm1 = vaultData.sm1,
+    sm2 = vaultData.sm2,
+    vsum = vaultData.vsum,
+    tagN = tagN,
+    tagS = tagS,
+    antiIdx = antiIdx,
   }
 end
 

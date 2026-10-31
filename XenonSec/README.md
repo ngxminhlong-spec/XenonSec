@@ -39,7 +39,7 @@ Run `lua xenonsec.lua -h` for the full help text.
 |---|---|
 | `-o <file>` | Output path (default: `<input>.xenon.lua`). |
 | `--luau` | Parse the input as Luau (see [Luau support](#luau-support)). |
-| `--antidebug` | Enable debug-hook, timing, and env-logger detection. Off by default because of false-positive risk with profilers and IDEs. |
+| `--antidebug` | Enable debug-hook, native-hook, coroutine-hook, and env-logger detection. Off by default because of false-positive risk with profilers and IDEs. |
 | `--proxify` | Store registers and captured locals in proxy objects. Harder to read statically, slower (see [ProxifyLocal](#proxifylocal-opt-in---proxify)). |
 | `--junk <0..1>` | Junk-instruction rate. Default is auto-scaled to input size (about 0.20 to 0.55). `0` disables. |
 | `--decoys <n>` | Number of decoy constants. Default is auto-scaled. |
@@ -82,7 +82,7 @@ Runtime notes:
   environment won't see it. Raw Lute already gives `_G` no view of assignments,
   so single-file scripts behave identically.
 - Lune has no `debug` library, so hook-based anti-debug checks are inert there.
-  The env-logger and timing checks still run.
+  The env-logger check still runs.
 
 ## What gets obfuscated
 
@@ -177,7 +177,7 @@ Explicit `--junk`, `--decoys`, and `--strength` values override the auto-scaling
 
 ### Size target
 
-Builds target at least 100000 bytes (`minSize`; `false` disables it). If a
+Padding is off by default. Set `minSize` (CLI `--min-size <n>`) to target at least n bytes. If a
 build comes out short, it is rebuilt with a higher `strength`, which scales the
 decoy handlers and dead blocks. The padding is dead code. It makes one-shot
 pastes awkward, and adds no secrecy to the logic.
@@ -210,16 +210,23 @@ These checks carry real false-positive risk against legitimate profilers and
 IDEs, so they are off by default.
 
 - **Hook check**: `debug.gethook()` returns non-nil if something is attached.
-  Normal execution never installs a hook on itself.
-- **Timing check**: a tight loop of trivial work takes implausibly long under
-  single-stepping or breakpoints.
+  Normal execution never installs a hook on itself. The check also looks at
+  the hook of the running coroutine, since a debugger can attach to either.
+- **Native check**: the hook probe must be the engine's own C function
+  (`debug.getinfo(...).what == "C"`). Tooling usually installs itself by
+  wrapping that function in a Lua one, which this catches.
+- **Encrypted names**: the names the checks use (`debug`, `gethook`, `getinfo`,
+  `coroutine`, `running`) are encrypted constants, decoded only when used. They
+  never appear as plaintext in the output.
+- The timing check was removed. A tight-loop timing test misfired under normal
+  load, so it cost more false positives than it caught.
 - **Env-logger check**: detects replacing a global like `print` or `pairs` with
   a table carrying a `__call` metamethod. `type()` on such a proxy returns
   `"table"`, never `"function"`, which is a zero-false-positive signal. The
   global names checked are pulled from the same encrypted pool as everything
   else.
 
-All three feed the same "brick every opcode" reaction as the tamper checksum.
+The hook, native and env-logger checks feed the same "brick every opcode" reaction as the tamper checksum.
 Every check is guarded to skip silently when `debug` or `os` is missing, as is
 common in sandboxed hosts.
 

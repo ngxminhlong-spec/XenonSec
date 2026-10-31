@@ -21,7 +21,7 @@ Options:
   --no-localize    Disable global localization (local aliases for globals)
   --no-ssa         Disable SSA-style value propagation / dead-store elimination
   --no-antitamper  Disable the build-time checksum / runtime integrity check
-  --antidebug      Enable debug-hook, timing, and env-logger detection
+  --antidebug      Enable debug-hook, native-hook, and env-logger detection
                    (opt-in: real false-positive risk with legitimate
                    profilers/IDEs, so it's off by default)
   --luau           Parse input as Luau (compound ops, continue, type
@@ -40,6 +40,8 @@ Options:
                    auto-scaled to input size; pass a value to override)
   --strength <1-4> Decoy/clutter level (default 2). Scales decoy handlers and
                    decoy constants. Adds bulk, not secrecy: see the README.
+  --min-size <n>   Opt-in: grow the output to at least n bytes by raising
+                   --strength (padding is dead code; off by default)
   -h               Show this help
 
 ]])
@@ -87,6 +89,8 @@ while i <= #args do
     opts.junkRate = tonumber(args[i + 1]); i = i + 2
   elseif a == "--strength" then
     opts.strength = tonumber(args[i + 1]); i = i + 2
+  elseif a == "--min-size" then
+    opts.minSize = tonumber(args[i + 1]); i = i + 2
   elseif a == "--decoys" then
     opts.decoyConstants = tonumber(args[i + 1]); i = i + 2
   else
