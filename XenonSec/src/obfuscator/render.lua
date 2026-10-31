@@ -162,10 +162,10 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
   local function renderCoreHandlers()
     local parts = {}
     if KV.luauTypes then
-      parts[#parts + 1] = string.format("type %s = { %s: { number }, %s: number, %s: { [number]: any }, %s: number, %s: %s, %s: any, %s: boolean, %s: any, %s: number, %s: number, %s: number, %s: number, %s: any, %s: boolean }",
+      parts[#parts + 1] = string.format("type %s = { %s: { number }, %s: number, %s: { [number]: any }, %s: number, %s: %s, %s: any, %s: boolean, %s: any, %s: number, %s: number, %s: number, %s: number, %s: any, %s: boolean, %s: number }",
         ensureName("FrameT"), ensureName("code"), ensureName("ip"), ensureName("regs"), ensureName("top"),
         ensureName("scope"), ensureName("ScopeT"), ensureName("va"), ensureName("fin"), ensureName("ret"),
-        ensureName("pr"), ensureName("x2"), ensureName("x3"), ensureName("x4"), ensureName("rv"), ensureName("rn"))
+        ensureName("pr"), ensureName("x2"), ensureName("x3"), ensureName("x4"), ensureName("rv"), ensureName("rn"), ensureName("st"))
       parts[#parts + 1] = string.format("type %s = { %s: { [any]: any }, %s: any }", ensureName("ScopeT"),
         ensureName("varsField"), ensureName("parentField"))
     end

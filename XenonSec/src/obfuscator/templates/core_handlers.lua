@@ -270,12 +270,14 @@ return {
 [==[
   %H%[%OP_JMP%] = function(%F%%ANN_F%, %ins%%ANN_I%)
     if not (%OPQ_JMP%) then error() end
+    %F%.%st% = 0
     %F%.%ip% = %F%.%x2%
   end
 ]==],
 [==[
   %H%[%OP_JF%] = function(%F%%ANN_F%, %ins%%ANN_I%)
     if not (%OPQ_JF%) then error() end
+    %F%.%st% = 0
     local %v% = %F%.%regs%[%F%.%x2%]
     if %v% ~= nil and %v% ~= false then %F%.%ip% = %F%.%ip% + 1 else %F%.%ip% = %F%.%x3% end
   end
@@ -283,6 +285,7 @@ return {
 [==[
   %H%[%OP_JT%] = function(%F%%ANN_F%, %ins%%ANN_I%)
     if not (%OPQ_JT%) then error() end
+    %F%.%st% = 0
     local %v% = %F%.%regs%[%F%.%x2%]
     if %v% ~= nil and %v% ~= false then %F%.%ip% = %F%.%x3% else %F%.%ip% = %F%.%ip% + 1 end
   end
@@ -290,6 +293,7 @@ return {
 [==[
   %H%[%OP_JNIL%] = function(%F%%ANN_F%, %ins%%ANN_I%)
     if not (%OPQ_JNIL%) then error() end
+    %F%.%st% = 0
     if %F%.%regs%[%F%.%x2%] == nil then %F%.%ip% = %F%.%x3% else %F%.%ip% = %F%.%ip% + 1 end
   end
 ]==],
