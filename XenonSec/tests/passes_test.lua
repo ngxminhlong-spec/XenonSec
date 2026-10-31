@@ -70,6 +70,18 @@ do
 end
 
 do
+  -- Per-proto encryption: instructions never appear as plaintext tuples, and
+  -- every proto carries its own nonce and ciphertext blob.
+  local src = "local function a() return 1 end local function b(x) return x + 2 end print(a(), b(3))\n"
+  local out = Obf.obfuscate(src, "t", { minSize = false })
+  local _, blobs = out:gsub('b="', "")
+  local _, nonces = out:gsub(",n=%d+,b=", "")
+  check("every proto has its own encrypted blob", blobs >= 3 and nonces == blobs,
+    ("blobs=%d nonces=%d"):format(blobs, nonces))
+  check("no plaintext instruction lists in the output", out:find("c={", 1, true) == nil)
+end
+
+do
   -- Padding is opt-in: the default build is not padded, and an explicit
   -- minSize still grows the output to its target.
   local src = "print('size check')\n"
@@ -82,13 +94,14 @@ do
 end
 
 do
-  -- Periodic anti-tamper: corrupt only the per-proto checksums (the startup
-  -- check does not read them), so only the rolling verifier can catch it.
+  -- Per-proto checksum tamper. The per-proto checksum is also folded into the
+  -- startup checksum, so the startup check catches this too; the test only
+  -- asserts that a patched build never runs to completion.
   local src = "local function f(n) local s = 0 for i = 1, n do s = s + i end return s end\n" ..
               "local t = 0 for i = 1, 30000 do t = t + f(3) end print('done', t)\n"
   local out = Obf.obfuscate(src, "p", { minSize = false })
-  local tampered, n = out:gsub("k=(%d+),c=", function(k)
-    return "k=" .. tostring((tonumber(k) + 1) % 2147483647) .. ",c="
+  local tampered, n = out:gsub("k=(%d+),n=", function(k)
+    return "k=" .. tostring((tonumber(k) + 1) % 2147483647) .. ",n="
   end)
   check("periodic verifier sees the patched checksums", n >= 1, "patched=" .. n)
   local chunk = load(tampered, "p2", "t")

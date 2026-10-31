@@ -7,6 +7,7 @@ local dir = debug.getinfo(1, "S").source:match("@?(.*/)") or "./"
 local load = dofile(dir .. "loader.lua")
 local _crypto = load("crypto")
 local cipherEncrypt = _crypto.cipherEncrypt
+local CIPHER = _crypto.CIPHER
 local _opcodes = load("opcodes")
 local BINOP_SYMBOLS, OPCODES, UNOP_SYMBOLS, constField = _opcodes.BINOP_SYMBOLS, _opcodes.OPCODES, _opcodes.UNOP_SYMBOLS, _opcodes.constField
 local _util = load("util")
@@ -283,33 +284,68 @@ local function buildBundle(mod, opts)
     for i = 1, #c do checksum = mixChecksum(checksum, c:byte(i)) end
   end
 
+  -- Per-proto encryption. Each proto's instructions are packed into 15 bytes
+  -- (five 3-byte fields: masked opcode, a, b, c, seed). The packed bytes are
+  -- encrypted with a key derived from the build key and the proto's own
+  -- nonce, and the proto stores only that ciphertext. The engine decrypts a
+  -- proto the first time it is called (%dproto% in the header), so protos
+  -- that never run are never decrypted.
+  local function deriveProtoKey(nonce)
+    local s = (CIPHER.basis + nonce) % 16777216
+    local out = {}
+    for i = 1, #key do
+      s = (s * CIPHER.mult + CIPHER.add) % 16777216
+      out[i] = xor8(key[i], math.floor(s / 65536) % 256)
+    end
+    return out
+  end
+
+  local function packInstr(eop, ea, eb, ec, seed)
+    local parts = {}
+    for _, v in ipairs({ eop, ea, eb, ec, seed }) do
+      parts[#parts + 1] = string.char(math.floor(v / 65536) % 256,
+                                      math.floor(v / 256) % 256, v % 256)
+    end
+    return table.concat(parts)
+  end
+
+  -- Lua string literal with bytes >= 128 written as decimal escapes, so the
+  -- output stays pure ASCII.
+  local function luaBytes(str)
+    return (string.format("%q", str):gsub("[\128-\255]", function(ch)
+      return string.format("\\%03d", ch:byte())
+    end))
+  end
+
   local protoLits = {}
   for _, proto in ipairs(mod.protos) do
-    checksum = mixChecksum(checksum, proto.hasVararg and 1 or 0)
-    local psum = mixChecksum(5381, proto.hasVararg and 1 or 0)
-    local codeParts = {}
-    for ipIdx, instr in ipairs(proto.code) do
+    local nonce = math.random(1, MOD - 1)
+    local hasV = proto.hasVararg and 1 or 0
+    checksum = mixChecksum(checksum, hasV)
+    local psum = mixChecksum(5381, hasV)
+
+    local plain = {}
+    for _, instr in ipairs(proto.code) do
       local seed = math.random(0, MOD - 1)
       local opn = OPNUM[instr.op]
       local a = instr.a or 0
       local b = instr.b or 0
       local c = instr.c or 0
-      local eop = encodeField(opn, seed, 1)
-      local ea = encodeField(a, seed, 2)
-      local eb = encodeField(b, seed, 3)
-      local ec = encodeField(c, seed, 4)
-      checksum = mixChecksum(checksum, seed)
-      checksum = mixChecksum(checksum, eop)
-      checksum = mixChecksum(checksum, ea)
-      checksum = mixChecksum(checksum, eb)
-      checksum = mixChecksum(checksum, ec)
-      psum = mixChecksum(psum, seed)
-      psum = mixChecksum(psum, eop)
-      psum = mixChecksum(psum, ea)
-      psum = mixChecksum(psum, eb)
-      psum = mixChecksum(psum, ec)
-      codeParts[#codeParts + 1] = string.format("{%d,%d,%d,%d,%d}", eop, ea, eb, ec, seed)
+      plain[#plain + 1] = packInstr(encodeField(opn, seed, 1), encodeField(a, seed, 2),
+                                    encodeField(b, seed, 3), encodeField(c, seed, 4), seed)
     end
+    local blob = cipherEncrypt(table.concat(plain), deriveProtoKey(nonce))
+
+    -- Integrity: the nonce and every ciphertext byte are covered, in the same
+    -- order the runtime's %verify% and %vp% use.
+    checksum = mixChecksum(checksum, nonce)
+    psum = mixChecksum(psum, nonce)
+    for i = 1, #blob do
+      local bv = blob:byte(i)
+      checksum = mixChecksum(checksum, bv)
+      psum = mixChecksum(psum, bv)
+    end
+
     local paramParts = {}
     for _, pair in ipairs(proto.paramIdx) do
       checksum = mixChecksum(checksum, pair[1])
@@ -320,11 +356,10 @@ local function buildBundle(mod, opts)
     end
     checksum = mixChecksum(checksum, psum)
     protoLits[#protoLits + 1] = string.format(
-      "{p={%s},v=%s,k=%d,c={%s}}",
+      "{p={%s},v=%s,k=%d,n=%d,b=%s}",
       table.concat(paramParts, ","),
       proto.hasVararg and "true" or "false",
-      psum,
-      table.concat(codeParts, ",")
+      psum, nonce, luaBytes(blob)
     )
   end
   checksum = keyedFinal(checksum, key)
