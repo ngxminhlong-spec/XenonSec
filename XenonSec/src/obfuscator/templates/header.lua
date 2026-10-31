@@ -9,6 +9,7 @@ local %byte% = string.byte
 local %char% = string.char
 local %concat% = table.concat
 __XS_STD__
+__XS_TYPEMANGLER__
 local function %bxor%(%a%, %b%)
   local %r%, %bit%, %x%, %y% = 0, 1, %a%, %b%
   while %x% > 0 or %y% > 0 do
@@ -212,9 +213,13 @@ local %corrupt% = function()
   -- Force EVERY instruction in EVERY proto to an opcode number that
   -- can never match any real one, so the very first instruction any
   -- proto executes fails immediately, no matter where the tamper was.
+  -- Poison a random third of the instructions, not all: the failure then
+  -- lands at a point that depends on the run rather than on the tamper site.
   for %cpi% = 1, #%protos% do
     local %cpc% = %protos%[%cpi%].c
-    for %cpj% = 1, #%cpc% do %cpc%[%cpj%][1] = nil end
+    for %cpj% = 1, #%cpc% do
+      if math.random(1, 3) == 1 then %cpc%[%cpj%][1] = nil end
+    end
   end
 end
 

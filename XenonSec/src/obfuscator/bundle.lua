@@ -135,6 +135,8 @@ local function buildBundle(mod, opts)
   local watermarkIdx = addConst(mod, "Protected by XenonSec")
   local antiPre = {}
   for _, nm in ipairs(ANTI_NAMES) do antiPre[nm] = addConst(mod, nm) end
+  -- The handler self-test needs a constant 3 to drive the BINK check.
+  local threePre = addConst(mod, 3)
 
   -- 1.5. Sprinkle in decoy constants: random junk strings/numbers that
   --      no instruction ever references. They shuffle in among the
@@ -189,6 +191,7 @@ local function buildBundle(mod, opts)
   watermarkIdx = perm[watermarkIdx]
   local antiIdx = {}
   for nm, idx in pairs(antiPre) do antiIdx[nm] = perm[idx] end
+  local threeIdx = perm[threePre]
 
 
   -- 3. Randomize opcode numbers for this build. Binary/unary operator
@@ -351,6 +354,7 @@ local function buildBundle(mod, opts)
     tagN = tagN,
     tagS = tagS,
     antiIdx = antiIdx,
+    threeIdx = threeIdx,
   }
 end
 

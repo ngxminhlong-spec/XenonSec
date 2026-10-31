@@ -36,6 +36,9 @@ local minifyTemplateText, randomIdent, substitute = _util.minifyTemplateText, _u
 local FOOTER_TEMPLATE = load("templates/footer")
 local HEADER_TEMPLATE = load("templates/header")
 local VM_TEMPLATE = load("templates/vm")
+local CORE_BLOCKS = load("templates/core_handlers")
+local _tm = load("typemangler")
+local buildTypeMangler, scatterType = _tm.buildTypeMangler, _tm.scatterType
 
 math.randomseed(os.time() + (tonumber(tostring({}):match("0x(%x+)"), 16) or 0))
 -- burn a few values; Lua's stock PRNG is weak but this is for build-time
@@ -133,6 +136,10 @@ local function obfuscateOnce(source, chunkname, opts)
   if opts.junkRate and opts.junkRate > 0 then Junk.inject(mod, opts.junkRate) end
   if opts.flatten ~= false then Passes.flatten(mod, math.random, opts.strength or 1) end
   local bundle = buildBundle(mod, opts)
+  -- Luau type syntax (TypeMangler decoys, frame annotations) is emitted only
+  -- for Luau output that wants it. typeMangler = false keeps Luau output
+  -- plain-Lua-parseable, for hosts that aren't Luau.
+  local useTypes = (opts.luau and opts.typeMangler ~= false) and true or false
 
   local vmSrc = opts.minify and minifyTemplateText(VM_TEMPLATE) or VM_TEMPLATE
   -- ProxifyLocal register map: i -> (i*PA + PB) % PM. PA is odd, so the map is
@@ -144,7 +151,10 @@ local function obfuscateOnce(source, chunkname, opts)
     { M1 = bundle.saltM1, M2 = bundle.saltM2, MOD = bundle.mod, strength = opts.strength or 1,
       proxify = opts.proxify and true or false, PA = proxyA, PB = proxyB, PM = PROXY_M,
       freeKey = bundle.freeKey, decoyCount = bundle.decoyCount,
-      flush = opts.flushConsts and true or false, flushEvery = opts.flushEvery or 65536 })
+      flush = opts.flushConsts and true or false, flushEvery = opts.flushEvery or 65536,
+      coreBlocks = CORE_BLOCKS, wm = bundle.watermarkIdx, three = bundle.threeIdx,
+      minifyFn = opts.minify and minifyTemplateText or nil, luauTypes = useTypes,
+      scatterType = scatterType })
 
   local vaultLit = table.concat(bundle.vault, ",")
   local kmapLit = table.concat(bundle.kmap, ",")
@@ -244,6 +254,8 @@ local function obfuscateOnce(source, chunkname, opts)
     return resolveShared(tok)
   end)
   footer = rewriteStd(footer, stdTab, stdList, stdIndex)
+  local tmText = useTypes and buildTypeMangler() or nil
+  header = header:gsub("__XS_TYPEMANGLER__", function() return tmText or "" end)
   header = header:gsub("__XS_STD__", function()
     if #stdList == 0 then return "" end
     return buildStdBlock(stdTab, stdList, stdNames, stdSalt)

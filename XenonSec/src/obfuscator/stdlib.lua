@@ -71,7 +71,9 @@ local function rewriteStd(text, tabName, list, index)
       local prev = prevNonSpace(i)
       local before = text:sub(math.max(1, i - 12), i - 1)
       local isField = prev == "." or prev == ":"
-      local isDecl = before:match("local%s+$") or before:match("function%s+$")
+      -- `type Name = ...` is a Luau type alias keyword, not the std `type` call.
+      local isTypeAlias = name == "type" and text:match("^%s+[%a_]", i + #name) ~= nil
+      local isDecl = before:match("local%s+$") or before:match("function%s+$") or isTypeAlias
       local nextTok = text:match("^%s*(.)", i + #name)
       local isKey = nextTok == "=" and text:match("^%s*==", i + #name) == nil
       local path

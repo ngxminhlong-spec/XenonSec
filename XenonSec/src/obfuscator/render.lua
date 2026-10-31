@@ -10,7 +10,74 @@ local BINOP_TOKEN_NAMES, UNOP_TOKEN_NAMES, genDecoyHandlers, genOpHandlers = _ha
 local _predicates = load("predicates")
 local genOpaquePredicate = _predicates.genOpaquePredicate
 local _util = load("util")
-local randomIdent, substitute = _util.randomIdent, _util.substitute
+local randomIdent, substitute, shuffledRange = _util.randomIdent, _util.substitute, _util.shuffledRange
+
+-- Handler self-test. Runs each simple handler against a synthetic frame with
+-- known inputs and checks the frame it leaves behind. Numbers are written as
+-- arithmetic, and the checks are emitted in a random order. Handlers that
+-- depend on scopes, calls or globals are not covered.
+local function renderSelfTest(ensureName, OPNUM, BINNUM, UNNUM, KV)
+  local _opcodes = load("opcodes")
+  local BINOP_SYMBOLS, UNOP_SYMBOLS = _opcodes.BINOP_SYMBOLS, _opcodes.UNOP_SYMBOLS
+  local H = ensureName("H")
+  local regsF, ipF = ensureName("regs"), ensureName("ip")
+  local x2, x3, x4, prF = ensureName("x2"), ensureName("x3"), ensureName("x4"), ensureName("pr")
+  local BINOPS, UNOPS = ensureName("BINOPS"), ensureName("UNOPS")
+  local run, hc, brick = ensureName("hrun"), ensureName("hcheck"), ensureName("brick")
+  local out = {}
+  out[#out + 1] = string.format("local function %s(num, a2, a3, a4, init)", run)
+  out[#out + 1] = string.format("  local f = { %s = {}, %s = a2, %s = a3, %s = a4, %s = 1, %s = 7 }",
+    regsF, x2, x3, x4, ipF, prF)
+  out[#out + 1] = string.format("  for i, v in pairs(init) do f.%s[i] = v end", regsF)
+  out[#out + 1] = string.format("  %s[num](f, nil)", H)
+  out[#out + 1] = string.format("  return f.%s, f.%s", regsF, ipF)
+  out[#out + 1] = "end"
+  out[#out + 1] = string.format("local function %s()", hc)
+  local groups = {}
+  local function enc(n)
+    local k = math.random(1000, 99999)
+    return string.format("((%d + %d) - %d)", n, k, k)
+  end
+  local function call(num, a2, a3, a4, init)
+    return string.format("%s(%s, %s, %s, %s, %s)", run, enc(num), a2, a3, a4, init or "{}")
+  end
+  local function group(callStr, cond)
+    groups[#groups + 1] = { "    r, ip = " .. callStr, "    if not (" .. cond .. ") then return false end" }
+  end
+  group(call(OPNUM.LOADK, "1", tostring(KV.wm), "0"), 'r[1] == "Protected by XenonSec" and ip == 2')
+  group(call(OPNUM.LOADTRUE, "1", "0", "0"), "r[1] == true and ip == 2")
+  group(call(OPNUM.LOADFALSE, "1", "0", "0"), "r[1] == false and ip == 2")
+  group(call(OPNUM.LOADNIL, "1", "2", "0", "{[1]=5,[2]=6}"), "r[1] == nil and r[2] == nil and ip == 2")
+  group(call(OPNUM.MOVE, "1", "2", "0", "{[2]=9}"), "r[1] == 9 and ip == 2")
+  group(call(OPNUM.JMP, "40", "0", "0"), "ip == 40")
+  group(call(OPNUM.JF, "1", "40", "0", "{[1]=false}"), "ip == 40")
+  group(call(OPNUM.JF, "1", "40", "0", "{[1]=0}"), "ip == 2")
+  group(call(OPNUM.JT, "1", "40", "0", "{[1]=0}"), "ip == 40")
+  group(call(OPNUM.JT, "1", "40", "0", "{[1]=false}"), "ip == 2")
+  group(call(OPNUM.JNIL, "1", "40", "0", "{}"), "ip == 40")
+  group(call(OPNUM.JNIL, "1", "40", "0", "{[1]=false}"), "ip == 2")
+  for k, sym in ipairs(BINOP_SYMBOLS) do
+    local num = BINNUM[sym]
+    group(call(OPNUM["BIN" .. k], "1", "2", "3", "{[2]=7,[3]=3}"),
+      string.format("r[1] == %s[%s](7, 3) and ip == 2", BINOPS, enc(num)))
+    group(call(OPNUM["BINK" .. k], "1", "2", tostring(KV.three), "{[2]=7}"),
+      string.format("r[1] == %s[%s](7, 3) and ip == 2", BINOPS, enc(num)))
+  end
+  for k, sym in ipairs(UNOP_SYMBOLS) do
+    local v = (sym == "#") and '"abc"' or "5"
+    group(call(OPNUM["UN" .. k], "1", "2", "0", "{[2]=" .. v .. "}"),
+      string.format("r[1] == %s[%s](%s) and ip == 2", UNOPS, enc(UNNUM[sym]), v))
+  end
+  out[#out + 1] = "  local r, ip"
+  for _, gi in ipairs(shuffledRange(#groups)) do
+    out[#out + 1] = groups[gi][1]
+    out[#out + 1] = groups[gi][2]
+  end
+  out[#out + 1] = "    return true"
+  out[#out + 1] = "end"
+  out[#out + 1] = string.format("if not %s() then %s() end", hc, brick)
+  return table.concat(out, "\n")
+end
 
 -- Renders the VM engine template: any %N_OPNAME% becomes this build's
 -- randomized opcode number; every other %ident% becomes a fresh random
@@ -23,11 +90,40 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
     if not nameCache[tok] then nameCache[tok] = randomIdent() end
     return nameCache[tok]
   end
+  local resolve -- forward: core blocks are substituted with the same resolver
+  -- Core handlers, shuffled per build. In Luau output each build also gets a
+  -- frame type that lists the VM's real frame fields, and scattered decoy types.
+  local function renderCoreHandlers()
+    local parts = {}
+    if KV.luauTypes then
+      parts[#parts + 1] = string.format("type %s = { %s: { number }, %s: number, %s: { [number]: any }, %s: number, %s: %s, %s: any, %s: boolean, %s: any, %s: number, %s: number, %s: number, %s: number }",
+        ensureName("FrameT"), ensureName("code"), ensureName("ip"), ensureName("regs"), ensureName("top"),
+        ensureName("scope"), ensureName("ScopeT"), ensureName("va"), ensureName("fin"), ensureName("ret"),
+        ensureName("pr"), ensureName("x2"), ensureName("x3"), ensureName("x4"))
+      parts[#parts + 1] = string.format("type %s = { %s: { [any]: any }, %s: any }", ensureName("ScopeT"),
+        ensureName("varsField"), ensureName("parentField"))
+    end
+    for _, bi in ipairs(shuffledRange(#KV.coreBlocks)) do
+      local blk = KV.coreBlocks[bi]
+      if KV.minifyFn then blk = KV.minifyFn(blk) end
+      parts[#parts + 1] = substitute(blk, resolve)
+      if KV.luauTypes and math.random() < 0.6 then parts[#parts + 1] = KV.scatterType() end
+    end
+    return table.concat(parts, "\n")
+  end
   -- The probe counter lives on the frame, so handlers reach it as F.pr.
   local function probeExpr()
     return ensureName("F") .. "." .. ensureName("pr")
   end
-  return substitute(template, function(tok)
+  resolve = function(tok)
+    if tok == "ANN_F" then
+      return KV.luauTypes and (": " .. ensureName("FrameT")) or ""
+    end
+    if tok == "ANN_I" then
+      return KV.luauTypes and ": { number }" or ""
+    end
+    if tok == "CORE_HANDLERS" then return renderCoreHandlers() end
+    if tok == "HANDLER_SELFTEST" then return renderSelfTest(ensureName, OPNUM, BINNUM, UNNUM, KV) end
     if tok == "ADCHECK" then
       if not antiDebug then return "" end
       -- Every 2048 dispatched instructions, re-probe for an attached hook.
@@ -128,7 +224,8 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
              genOpHandlers(ensureName, probeExpr, OPNUM, BINNUM, UNNUM)
     end
     return ensureName(tok)
-  end)
+  end
+  return substitute(template, resolve)
 end
 
 return {

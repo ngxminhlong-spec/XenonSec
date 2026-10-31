@@ -10,6 +10,14 @@ local BINOP_SYMBOLS, UNOP_SYMBOLS = _opcodes.BINOP_SYMBOLS, _opcodes.UNOP_SYMBOL
 local _predicates = load("predicates")
 local genAlwaysFalsePredicate, genOpaquePredicate = _predicates.genAlwaysFalsePredicate, _predicates.genOpaquePredicate
 
+local function shuffleLines(lines)
+  for i = #lines, 2, -1 do
+    local j = math.random(1, i)
+    lines[i], lines[j] = lines[j], lines[i]
+  end
+  return lines
+end
+
 -- Safe placeholder-token names for operator symbols (can't embed "+"
 -- etc directly in a %word% token).
 local BINOP_TOKEN_NAMES = {
@@ -65,7 +73,7 @@ local function genDecoyHandlers(ensureName, count, probeExpr, freeKey)
       "%s[%d] = function(%s, %s) if not (%s) then error() end %s %s.%s = %s.%s + 1 end",
       H, key, F, ins, cond, body, F, ip, F, ip)
   end
-  return table.concat(lines, "\n")
+  return table.concat(shuffleLines(lines), "\n")
 end
 
 -- Handlers for the operator opcodes. Each reads its operands from the frame
@@ -97,7 +105,7 @@ local function genOpHandlers(ensureName, probeExpr, OPNUM, BINNUM, UNNUM)
       "local r = %s.%s; r[%s.%s] = %s[%d](r[%s.%s]);",
       F, regsF, F, x2, UNOPS, num, F, x3))
   end
-  return table.concat(lines, "\n")
+  return table.concat(shuffleLines(lines), "\n")
 end
 
 return {
