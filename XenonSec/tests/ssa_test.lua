@@ -488,5 +488,144 @@ x = 2
 print("end", rawget(_G, "x"))
 ]])
 
+-- Loop bodies that call a closure which mutates a captured local.
+t("REGRESSION: a call in a loop body invalidates a captured local after the loop", [[
+local flag = tonumber("1") == 1
+local x = 1
+local function set() x = 2 end
+while flag do set(); break end
+local y = x
+print("y", y, x)
+]])
+
+t("REGRESSION: a call in a for body invalidates a captured local after the loop", [[
+local x = 1
+local function set() x = 2 end
+for i = 1, 3 do set() end
+local y = x
+print("y", y, x)
+]])
+
+t("REGRESSION: a call that only runs on a break path still invalidates", [[
+local x = 1
+local function set() x = 2 end
+local n = 0
+while true do
+  n = n + 1
+  if n > 2 then set(); break end
+end
+local y = x
+print("y", y, x)
+]])
+
+-- Loop-header phi: a value the loop cannot change stays known inside it.
+tHas("loop phi: a value the body never changes stays known inside the loop", [[
+local x = 3
+for i = 1, 2 do print(x) end
+]], "print(3)")
+
+tHas("loop phi: a value re-set to the same literal on every back edge stays known", [[
+local x = 3
+local n = 0
+while os.time() < 0 or n < 2 do
+  print(x)
+  x = 3
+  n = n + 1
+end
+]], "print(3)")
+
+t("loop phi: a counter that changes each iteration is not propagated", [[
+local x = 1
+for i = 1, 3 do
+  print(x)
+  x = x + 1
+end
+print(x)
+]])
+
+t("loop phi: a value changed only through break is not propagated past the loop", [[
+local x = 1
+for i = 1, 3 do
+  if i == 2 then x = 9; break end
+end
+print(x)
+]])
+
+t("loop phi: a continue path that changes the value blocks propagation", [[
+local x = 1
+for i = 1, 4 do
+  if i % 2 == 0 then x = 5 end
+  if i == 3 then x = 7 end
+  print(x)
+end
+]])
+
+t("loop phi: a skipped iteration path keeps an unchanged value correct", [[
+local x = 4
+local n = 0
+while n < 3 do
+  n = n + 1
+  if n ~= 2 then print(x, n) end
+end
+print(x)
+]])
+
+t("loop phi: nested loops with an inner call and an outer constant", [[
+local x = 1
+local function bump() x = x + 1 end
+local k = 10
+for i = 1, 2 do
+  for j = 1, 2 do
+    bump()
+    print(k, x)
+  end
+end
+print(x, k)
+]])
+
+t("loop phi: a repeat-until condition sees a value a body path changes", [[
+local x = 0
+local n = 0
+repeat
+  n = n + 1
+  if n == 2 then x = 5 end
+until x == 5 or n > 4
+print(x, n)
+]])
+
+t("loop phi: a loop nested four deep still runs correctly (conservative past the bound)", [[
+local t = 0
+for a = 1, 2 do
+  for b = 1, 2 do
+    for c = 1, 2 do
+      for d = 1, 2 do
+        t = t + 1
+      end
+    end
+  end
+end
+print(t)
+]])
+
+t("REGRESSION: a metamethod that mutates a captured local is not skipped", [[
+local x
+local mt = {__add = function() x = 2 return 0 end}
+local a = setmetatable({}, mt)
+x = 1
+local y = a + 1
+local z = x
+print("z", z, y)
+]])
+
+t("REGRESSION: an __index metamethod that mutates a captured local is not skipped", [[
+local x
+local mt = {__index = function() x = 7 return 0 end}
+local a = setmetatable({}, mt)
+x = 1
+local y = a.anything
+local z = x
+print("z", z, y)
+]])
+
 print()
 print(pass .. " / " .. total .. " ssa tests passed")

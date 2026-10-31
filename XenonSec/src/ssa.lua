@@ -19,10 +19,14 @@
 -- conservative (see "Cross-branch propagation" below): values flow into
 -- if/do/loop bodies, a merge after an if keeps only the values that every
 -- falling-through branch agrees on (a phi of identical inputs), and an
--- if whose condition is a literal after propagation is collapsed. Loop
--- bodies get no value that the loop itself can change between iterations,
--- so loop-carried values are never merged, and full phi-functions for
--- loop headers (with fixed-point iteration) are not built.
+-- if whose condition is a literal after propagation is collapsed. Loops
+-- get a phi at the header: a value survives into the loop only if every
+-- back edge, continue and break still carries it, found by a fixed point
+-- over trial copies of the body. Loops nested deeper than MAX_PHI_DEPTH use
+-- the plainer rule that drops everything the loop assigns.
+--
+-- Any operation that can run Lua code (a call, indexing, or an operator
+-- that may reach a metamethod) invalidates captured names it might change.
 --
 -- Run this AFTER fold.lua (so literal arithmetic is already reduced)
 -- and run fold.lua again afterward (propagating a copied literal into
@@ -45,6 +49,11 @@ local SSA = {}
 
 local capturedNames = {}
 
+-- Can evaluating this expression run Lua code that might change a captured
+-- local? Calls obviously can. So can indexing and most operators, through
+-- __index, __add, __concat, __eq, __len and the rest of the metamethods, and a
+-- metamethod can call a closure that assigns a captured name. Only `and`,
+-- `or` and `not` are known to run no code.
 local function exprContainsCall(node)
   local kind = node.kind
   if kind == "Call" or kind == "MethodCall" then return true end
@@ -52,7 +61,7 @@ local function exprContainsCall(node)
     or kind == "False" or kind == "Vararg" or kind == "Name" or kind == "Function" then
     return false
   elseif kind == "Index" then
-    return exprContainsCall(node.obj) or exprContainsCall(node.key)
+    return true
   elseif kind == "Paren" then
     return exprContainsCall(node.expr)
   elseif kind == "Table" then
@@ -62,9 +71,13 @@ local function exprContainsCall(node)
     end
     return false
   elseif kind == "Binop" then
-    return exprContainsCall(node.lhs) or exprContainsCall(node.rhs)
+    if node.op == "and" or node.op == "or" then
+      return exprContainsCall(node.lhs) or exprContainsCall(node.rhs)
+    end
+    return true
   elseif kind == "Unop" then
-    return exprContainsCall(node.operand)
+    if node.op == "not" then return exprContainsCall(node.operand) end
+    return true
   end
   return false
 end
@@ -478,11 +491,6 @@ function collectAssignTargetsBlock(block, into)
   for _, s in ipairs(block.body) do collectAssignTargetsStat(s, into) end
 end
 
-local function invalidateFromNested(stat, env)
-  local names = {}
-  collectAssignTargetsStat(stat, names)
-  for name in pairs(names) do env[name] = nil end
-end
 
 --------------------------------------------------------------------
 -- Cross-branch propagation. Values flow into nested blocks and back
@@ -494,10 +502,12 @@ end
 --     branches: a name keeps a tracked value only if every branch that
 --     can fall through ends with the same literal for it. An implicit
 --     empty else counts as a branch that changes nothing.
---   * A loop body starts from the entry environment minus everything
---     the loop can change between iterations: names assigned anywhere
---     in the loop, names the body declares, the loop variables, and
---     every captured name when the loop calls anything.
+--   * A loop header starts from the entry environment minus the loop
+--     variables, names the body declares, and captured names when the
+--     loop runs code. Then names whose value differs on some back edge,
+--     continue or break are dropped, repeating until nothing changes
+--     (loopHeaderEnv). The header environment is also the environment
+--     after the loop, so every route out of the loop has been checked.
 --   * A condition that is a literal after propagation decides its if:
 --     dead clauses are dropped, and a surviving first clause collapses
 --     the whole statement into a do-block.
@@ -585,7 +595,77 @@ function blockContainsCall(block)
   return false
 end
 
+-- Deep copy of an AST subtree, so a trial optimization of a loop body can
+-- never leave changes behind when its result is thrown away.
+local function deepCopy(node, seen)
+  if type(node) ~= "table" then return node end
+  seen = seen or {}
+  if seen[node] then return seen[node] end
+  local out = {}
+  seen[node] = out
+  for k, v in pairs(node) do out[k] = deepCopy(v, seen) end
+  return out
+end
+
+-- One frame per loop body being optimized. Break and Continue record the
+-- environment at their own point, so the loop fixed point can check every
+-- route back to the header and every route out of the loop.
+local loopFrames = {}
+-- Loops currently nested inside each other. Past MAX_PHI_DEPTH the loop
+-- uses the conservative entry environment, which keeps the work bounded.
+local loopDepth = 0
+local MAX_PHI_DEPTH = 3
+
+-- Can control fall off the end of this block (into the next iteration)?
+local function fallsThrough(block)
+  local last = block.body[#block.body]
+  return not (last ~= nil and (last.kind == "Return" or last.kind == "Break"
+    or last.kind == "Continue"))
+end
+
+-- Optimizes a trial copy of a loop body and returns its exit environment
+-- and the environments recorded at its break and continue statements.
+local function trialLoopBody(body, entry, tail, scope)
+  local frame = { breaks = {}, continues = {} }
+  loopFrames[#loopFrames + 1] = frame
+  local exit = optimizeBlock(body, entry, tail, scope)
+  loopFrames[#loopFrames] = nil
+  return exit, frame
+end
+
+-- The environment that is valid at the header of EVERY iteration of a loop,
+-- found as a fixed point. It starts from the environment before the loop,
+-- minus what the loop cannot keep (loop variables, names the body declares,
+-- and captured names when the loop calls anything). It then drops each name
+-- whose value at some back edge, continue, or break differs from it, and
+-- repeats until nothing changes. A name that survives is a phi of identical
+-- inputs: the value before the loop and the value on every route back.
+-- Names only ever leave the set, so this terminates.
+local function loopHeaderEnv(env, s, tail, scope, loopVars)
+  local header = copyEnv(env)
+  for _, name in ipairs(loopVars) do header[name] = nil end
+  for name in pairs(declaredNames(s.body)) do header[name] = nil end
+  if statContainsCallDeep(s) then
+    for name in pairs(capturedNames) do header[name] = nil end
+  end
+  while true do
+    local exit, frame = trialLoopBody(deepCopy(s.body), header, tail, scope)
+    local bad = {}
+    local function check(e)
+      for name, v in pairs(header) do
+        if valueKey(e[name]) ~= valueKey(v) then bad[name] = true end
+      end
+    end
+    if fallsThrough(s.body) then check(exit) end
+    for _, e in ipairs(frame.continues) do check(e) end
+    for _, e in ipairs(frame.breaks) do check(e) end
+    if next(bad) == nil then return header end
+    for name in pairs(bad) do header[name] = nil end
+  end
+end
+
 -- The environment that is valid at the start of EVERY iteration of a loop.
+-- Conservative: drops every name the loop assigns.
 local function loopEntryEnv(env, body, cond, loopVars)
   local e = copyEnv(env)
   local assigned = {}
@@ -679,6 +759,12 @@ function optimizeBlock(block, entryEnv, tail, scope)
     local s = stmts[i]
     local subEnv = statementContainsCall(s) and withoutCaptured(env) or env
 
+    if (s.kind == "Break" or s.kind == "Continue") and #loopFrames > 0 then
+      local frame = loopFrames[#loopFrames]
+      local list = (s.kind == "Break") and frame.breaks or frame.continues
+      list[#list + 1] = copyEnv(env)
+    end
+
     -- Propagate known values into this statement's own expressions
     -- BEFORE interpreting what it defines or invalidates. A while or
     -- repeat condition re-evaluates every iteration, so it only sees
@@ -752,12 +838,26 @@ function optimizeBlock(block, entryEnv, tail, scope)
       if s.kind == "Repeat" then tail = { { kind = "ExprStat", expr = s.cond } } end
       local inner = copyEnv(locals)
       for _, name in ipairs(loopVars) do inner[name] = true end
-      optimizeBlock(s.body, loopEntryEnv(env, s.body, cond, loopVars), tail, inner)
-      if s.kind == "Repeat" then
-        -- The until-condition runs after the body, in the body's scope.
-        s.cond = substExpr(s.cond, loopEntryEnv(env, s.body, s.cond, {}))
+
+      loopDepth = loopDepth + 1
+      local header
+      if loopDepth <= MAX_PHI_DEPTH then
+        header = loopHeaderEnv(env, s, tail, inner, loopVars)
+      else
+        header = loopEntryEnv(env, s.body, cond, loopVars)
       end
-      invalidateFromNested(s, env)
+      -- The real pass, over the original body, with the agreed header.
+      trialLoopBody(s.body, header, tail, inner)
+      loopDepth = loopDepth - 1
+      -- The condition (re-evaluated at every header, and after the body for
+      -- repeat) only sees names whose value the loop cannot change.
+      if s.kind == "While" or s.kind == "Repeat" then
+        s.cond = substExpr(s.cond, header)
+      end
+      -- Leaving the loop, every name in the header set still has its value:
+      -- it was checked at every back edge, continue, and break.
+      for k in pairs(env) do env[k] = nil end
+      for k, v in pairs(header) do env[k] = v end
       out[#out + 1] = s
     else
       -- A function call anywhere in this statement could, through a

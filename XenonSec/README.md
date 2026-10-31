@@ -360,14 +360,25 @@ simple case:
   Without the reassignment check, `local x = 1; x = 2` would lose its
   declaration and write a global.
 
-Loops are conservative. Values the loop body can change are forgotten at loop
-entry, and no value is carried around a back edge. Full loop-header
-phi-functions with fixed-point iteration are not built, so this is not a
-complete CFG-based SSA.
+Loops get a phi at the header. A value survives into the loop only if every
+route back to the header (the end of the body, each `continue`, and each `break`)
+still carries the same value. The pass finds this by a fixed point: it optimizes
+a trial copy of the body, drops every name whose value disagrees on some route,
+and repeats until nothing changes. The header environment is also the
+environment after the loop, so a value can't leak out of a loop along a route
+that wasn't checked. Loops nested more than three deep use the plainer rule
+that drops everything the loop assigns, which keeps compile time bounded.
 
-Closures and statements containing a call are opacity walls for captured names.
-Here is why. A function call can mutate a variable through a closure that
-captured it, even with no visible assignment in between:
+This is still not a complete CFG-based SSA. There are no general phi-functions
+for values that merge through a `break` with different values, and there is
+no alias analysis.
+
+Operations that can run Lua code invalidate captured names they might change.
+That includes calls, indexing, and operators that can reach a metamethod (for
+example `a + 1` with an `__add` that assigns a captured local). Only `and`,
+`or`, and `not` are known to run no code. Here is why any of this matters. A
+function call can mutate a variable through a closure that captured it, even
+with no visible assignment in between:
 
 ```lua
 local calls = 0
@@ -381,8 +392,15 @@ print(t.x, calls)   -- an unguarded SSA would propagate calls=0 here
 
 The differential suite caught this as a wrong answer, not a crash. The fix:
 `capture.lua` runs once on the untransformed AST so SSA knows which names any
-closure can reach. A statement containing a call invalidates those names.
-Names never captured stay trackable across calls.
+closure can reach. A statement that can run code invalidates those names, and
+so does the end of a loop whose body does. Names never captured stay trackable
+across calls.
+
+Two bugs found by a randomized differential test after the loop phi went in:
+a call inside a loop body didn't invalidate a captured local after the loop
+(`local x = 1; local function set() x = 2 end; while flag do set(); break end;
+local y = x` printed `1`), and a metamethod that assigns a captured local went
+unseen by the pass entirely. Both are fixed and have regression tests.
 
 ## Luau support
 
@@ -482,7 +500,7 @@ XenonSec/
 |---|---|---|
 | Differential tests (reference VM vs. native Lua) | `run_tests.lua` | 38 / 38 |
 | End-to-end, every pass on | `e2e_test.lua` | 20 / 20 |
-| SSA pass, including regression and cross-branch cases | `ssa_test.lua` | 43 / 43 |
+| SSA pass, including regression, cross-branch, and loop phi cases | `ssa_test.lua` | 57 / 57 |
 | Luau features, against plain-Lua oracles | `luau_test.lua` | 12 / 12 |
 | Pass-level, including junk inside `f(g(h()))` windows | `passes_test.lua` | 12 / 12 |
 | Standard-library lookups, cache flush, cipher constants | `mutate_test.lua` | 16 / 16 |
@@ -534,7 +552,7 @@ Lune.
 - Input must be valid Lua 5.1 or Luau source. Compiled `.luac` bytecode is not
   supported.
 - Error messages point at the bundled VM file and line, not your original source.
-- SSA merges values across `if`/`else` but not across loop back edges.
+- SSA's loop phi covers loops nested up to three deep. Deeper loops use the plainer rule that drops every value the loop assigns.
 - Luau `__iter` iteration and function-expression attributes are not handled.
   See [Luau support](#luau-support).
 - Global writes under Lute stay private to the program, as described in
