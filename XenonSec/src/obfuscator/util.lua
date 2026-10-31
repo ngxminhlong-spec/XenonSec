@@ -7,7 +7,7 @@
 -- Small helpers
 --------------------------------------------------------------------
 
-local ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_"
+local ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 local function randomIdent(len)
   len = len or (6 + math.random(0, 5))
   local chars = {}
