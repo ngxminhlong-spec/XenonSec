@@ -97,8 +97,9 @@ end
 -- 5. Handler keys come from one dense pool (1..real + decoys). The base opcode
 --    handlers name their keys through locals, so the literal keys in the output
 --    are the other entries: their largest value is bounded by their count plus
---    the number of base opcodes (28). The old layout (decoys 1000..9999) broke
---    that bound by a wide margin.
+--    the number of base opcodes (28) plus up to two equivalent-opcode aliases
+--    per opcode (56). The old layout (decoys 1000..9999) broke that bound by a
+--    wide margin.
 do
   local out = Obf.obfuscate('print("x")', "t", { minSize = false, strength = 2 })
   local count, maxKey = 0, 0
@@ -110,9 +111,11 @@ do
     if v > maxKey then maxKey = v end
   end
   for k in out:gmatch("%[(%d+)%]%s*=%s*function%(") do take(k) end
+  -- Equivalent-opcode groups list every key of an opcode: [k] = {...}.
+  for k in out:gmatch("%[(%d+)%]%s*=%s*{[%d,%s]*}") do take(k) end
   for k in out:gmatch("%[%(%((%d+)%+%d+%)%-%d+%)%]%s*=%s*function%(") do take(k) end
   check("literal handler keys stay inside the dense pool bound",
-    count > 0 and maxKey <= count + 28, ("literal keys=%d largest=%d"):format(count, maxKey))
+    count > 0 and maxKey <= count + 28 + 56, ("literal keys=%d largest=%d"):format(count, maxKey))
 end
 
 -- 17. Metamorphic handlers: builds of one script differ in the shape of their

@@ -156,7 +156,8 @@ local function obfuscateOnce(source, chunkname, opts)
       coreBlocks = CORE_BLOCKS, coreVariants = CORE_VARIANTS,
       wm = bundle.watermarkIdx, three = bundle.threeIdx,
       minifyFn = opts.minify and minifyTemplateText or nil, luauTypes = useTypes,
-      scatterType = scatterType })
+      scatterType = scatterType,
+      opGroups = bundle.opGroups, rekeySeed = math.random(1, 2147483646) })
 
   local vaultLit = table.concat(bundle.vault, ",")
   local kmapLit = table.concat(bundle.kmap, ",")

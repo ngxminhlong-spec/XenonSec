@@ -78,7 +78,8 @@ do
   local _, nonces = out:gsub(",n=%d+,i=%d+,b=", "")
   check("every proto has its own encrypted blob", blobs >= 3 and nonces == blobs,
     ("blobs=%d nonces=%d"):format(blobs, nonces))
-  check("no plaintext instruction lists in the output", out:find("c={", 1, true) == nil)
+  -- A standalone key named c (identifiers can end in c, so anchor the match).
+  check("no plaintext instruction lists in the output", out:find("[^%w_]c={") == nil)
 end
 
 do
@@ -121,7 +122,8 @@ do
   local src = "local function f(n) local s = 0 for i = 1, n do s = s + i end return s end\n" ..
               "local t = 0 for i = 1, 30000 do t = t + f(3) end print('done', t)\n"
   local out = Obf.obfuscate(src, "p", { minSize = false })
-  local hooked, n = out:gsub("if not (%w+)%.c then (%w+)%.c = (%w+)%[7%]%((%w+)%) end",
+  -- The output is minified, so the spacing around = and ( is optional.
+  local hooked, n = out:gsub("if not (%w+)%.c then (%w+)%.c%s*=%s*(%w+)%[7%]%((%w+)%)%s*end",
     function(a, b, mod, c)
       return ("if not %s.c then %s.c = %s[7](%s); __XS_DEC = (__XS_DEC or 0) + 1; " ..
               "if __XS_DEC == 2 then %s.c[1][2] = %s.c[1][2] + 1 end end"):format(a, b, mod, c, b, b)

@@ -141,6 +141,8 @@ local function %run%(%mod%, ...)
 
 %HANDLER_SELFTEST%
 
+%OPALIASES%
+
   %runProto% = function(%protoIdx%, %callArgs%, %parentScope%)
     local %proto% = %protos%[%protoIdx%]
     if not %proto%.c then %proto%.c = %mod%[7](%proto%) end
