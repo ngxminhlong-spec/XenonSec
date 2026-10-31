@@ -261,16 +261,23 @@ local function buildBundle(mod, opts)
   local MOD = 1048573
   local saltM1 = math.random(2, MOD - 2)
   local saltM2 = math.random(2, MOD - 2)
+  -- Decode state: each field's mask also depends on a running state value.
+  -- The state advances from every instruction's opcode and is reset by jumps
+  -- and returns. The runtime dispatcher mirrors these constants exactly.
+  local saltM3 = math.random(2, MOD - 2)
+  local stepA = math.random(2, MOD - 2)
+  local stepB = math.random(2, MOD - 2)
+  local stepC = math.random(0, MOD - 1)
   -- The mask for one field depends on that instruction's own random seed
   -- and the field's slot (1 = opcode, 2..4 = operands). There is no
   -- position-only pattern to recover.
-  local function fieldMask(seed, slot)
-    return (seed * saltM1 + slot * saltM2) % MOD
+  local function fieldMask(seed, slot, st)
+    return (seed * saltM1 + slot * saltM2 + st * saltM3) % MOD
   end
-  local function encodeField(v, seed, slot)
+  local function encodeField(v, seed, slot, st)
     assert(type(v) == "number" and v >= 0 and v < MOD and v == math.floor(v),
       "XenonSec: instruction field out of encodable range: " .. tostring(v))
-    return (v + fieldMask(seed, slot)) % MOD
+    return (v + fieldMask(seed, slot, st)) % MOD
   end
 
   -- 5. Serialize protos as compact arrays: code[i] = {op, a, b, c}.
@@ -317,6 +324,8 @@ local function buildBundle(mod, opts)
     end))
   end
 
+  -- Opcodes after which the decode state resets to 0 (mirrors Passes.STATE_RESET).
+  local STATE_RESET = { JMP = true, JF = true, JT = true, JNIL = true, RET = true, RETM = true }
   local protoLits = {}
   for _, proto in ipairs(mod.protos) do
     local nonce = math.random(1, MOD - 1)
@@ -326,18 +335,20 @@ local function buildBundle(mod, opts)
 
     local plain = {}
     local ih = 5381
+    local cur = 0 -- decode state seen by the next instruction
     for _, instr in ipairs(proto.code) do
       local seed = math.random(0, MOD - 1)
       local opn = OPNUM[instr.op]
       local a = instr.a or 0
       local b = instr.b or 0
       local c = instr.c or 0
-      local eop, ea = encodeField(opn, seed, 1), encodeField(a, seed, 2)
-      local eb, ec = encodeField(b, seed, 3), encodeField(c, seed, 4)
+      local eop, ea = encodeField(opn, seed, 1, cur), encodeField(a, seed, 2, cur)
+      local eb, ec = encodeField(b, seed, 3, cur), encodeField(c, seed, 4, cur)
       plain[#plain + 1] = packInstr(eop, ea, eb, ec, seed)
       -- Same order the runtime hashes decoded tuples: seed, op, a, b, c.
       ih = mixChecksum(ih, seed); ih = mixChecksum(ih, eop); ih = mixChecksum(ih, ea)
       ih = mixChecksum(ih, eb); ih = mixChecksum(ih, ec)
+      if STATE_RESET[instr.op] then cur = 0 else cur = (cur * stepA + opn * stepB + stepC) % MOD end
     end
     local blob = cipherEncrypt(table.concat(plain), deriveProtoKey(nonce))
 
@@ -394,6 +405,7 @@ local function buildBundle(mod, opts)
     tagN = tagN,
     tagS = tagS,
     antiIdx = antiIdx,
+    saltM3 = saltM3, stepA = stepA, stepB = stepB, stepC = stepC,
     threeIdx = threeIdx,
   }
 end

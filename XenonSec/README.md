@@ -93,6 +93,7 @@ Runtime notes:
 | **Opcodes and operands** | Each instruction carries its own random seed. Its opcode and operands are stored masked with a value derived from that seed and the field's slot. The VM decodes each instruction just before running it and never holds a decoded program. |
 | **Operators** | Binary and unary operators dispatch through per-build randomized integers. No operator symbol appears in the output, not even as a table key. |
 | **Bytecode per proto** | Each function's instructions are packed and encrypted with its own key, derived from the build key and a per-proto nonce. A proto is decrypted the first time it is called. Protos that never run stay encrypted. |
+| **State-dependent decoding** | Each instruction's decode masks depend on a running state that advances from every executed opcode and resets at jumps and returns. The stored tuples can only be decoded by replaying the program's control flow. |
 | **Strings and constants** | One shared constant pool, shuffled and encrypted with a four-layer cipher and a per-build key. Constants are decrypted lazily on first use and cached. Constants the program never reaches are never decrypted. |
 | **Numeric constants** | An additional reversible additive mask applied before the string cipher. |
 | **Decoys** | Unreferenced decoy constants, decoy opcode handlers, decoy dispatch branches, and dead blocks, all in the same format as real code. |

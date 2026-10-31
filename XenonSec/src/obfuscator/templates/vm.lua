@@ -148,7 +148,7 @@ local function %run%(%mod%, ...)
       %code% = %proto%.c, %ip% = 1, %regs% = %NEWREGS%, %top% = 0,
       %scope% = { %varsField% = %NEWVARS%, %parentField% = %parentScope% },
       %va% = nil, %fin% = false, %ret% = nil, %pr% = 0,
-      %x2% = 0, %x3% = 0, %x4% = 0,
+      %x2% = 0, %x3% = 0, %x4% = 0, %st% = 0,
     }
     local %params% = %proto%.p
     for %pi% = 1, #%params% do
@@ -174,13 +174,14 @@ local function %run%(%mod%, ...)
       -- Step-by-step decode: this instruction's opcode and operands are
       -- decoded now, from its own seed, immediately before it runs.
       local %sd% = %ins%[5]
-      local %mk% = %sd% * %K_M1%
+      local %mk% = %sd% * %K_M1% + %F%.%st% * %K_M3%
       local %key% = (%ins%[1] - (%mk% + %K_M2%) % %K_MOD%) % %K_MOD%
       local %h% = %H%[%key%]
       if not %h% then error() end
       %F%.%x2% = (%ins%[2] - (%mk% + 2 * %K_M2%) % %K_MOD%) % %K_MOD%
       %F%.%x3% = (%ins%[3] - (%mk% + 3 * %K_M2%) % %K_MOD%) % %K_MOD%
       %F%.%x4% = (%ins%[4] - (%mk% + 4 * %K_M2%) % %K_MOD%) % %K_MOD%
+      %F%.%st% = (%F%.%st% * %K_SA% + %key% * %K_SB% + %K_SC%) % %K_MOD%
       %F%.%pr% = (%F%.%pr% + 1) % 65536
       %PERIODIC%
       %ADCHECK%
