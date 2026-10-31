@@ -36,6 +36,9 @@ local minifyTemplateText, randomIdent, substitute = _util.minifyTemplateText, _u
 local FOOTER_TEMPLATE = load("templates/footer")
 local HEADER_TEMPLATE = load("templates/header")
 local VM_TEMPLATE = load("templates/vm")
+local CORE_BLOCKS = load("templates/core_handlers")
+local _tm = load("typemangler")
+local buildTypeMangler, scatterType = _tm.buildTypeMangler, _tm.scatterType
 
 math.randomseed(os.time() + (tonumber(tostring({}):match("0x(%x+)"), 16) or 0))
 -- burn a few values; Lua's stock PRNG is weak but this is for build-time
@@ -57,7 +60,7 @@ local DEFAULTS = {
   antiTamper = true,   -- checksum-verified payload; zero false-positive risk, on by default
   flushConsts = true,  -- periodic flush of the decoded-constant cache (see PERIODIC)
   flushEvery = 65536,  -- steps between flushes: a dump sees only recently used constants
-  antiDebug = false,   -- debug.gethook + timing checks; real false-positive risk, opt-in
+  antiDebug = false,   -- debug-hook, native-hook and env-logger checks; false-positive risk, opt-in
   proxify = false,     -- ProxifyLocal: registers and captured locals live in proxy objects (slower)
   strength = 2,        -- 1..4: scales decoy handlers and decoy constants (size vs. clutter)
 }
@@ -133,6 +136,10 @@ local function obfuscateOnce(source, chunkname, opts)
   if opts.junkRate and opts.junkRate > 0 then Junk.inject(mod, opts.junkRate) end
   if opts.flatten ~= false then Passes.flatten(mod, math.random, opts.strength or 1) end
   local bundle = buildBundle(mod, opts)
+  -- Luau type syntax (TypeMangler decoys, frame annotations) is emitted only
+  -- for Luau output that wants it. typeMangler = false keeps Luau output
+  -- plain-Lua-parseable, for hosts that aren't Luau.
+  local useTypes = (opts.luau and opts.typeMangler ~= false) and true or false
 
   local vmSrc = opts.minify and minifyTemplateText(VM_TEMPLATE) or VM_TEMPLATE
   -- ProxifyLocal register map: i -> (i*PA + PB) % PM. PA is odd, so the map is
@@ -144,9 +151,13 @@ local function obfuscateOnce(source, chunkname, opts)
     { M1 = bundle.saltM1, M2 = bundle.saltM2, MOD = bundle.mod, strength = opts.strength or 1,
       proxify = opts.proxify and true or false, PA = proxyA, PB = proxyB, PM = PROXY_M,
       freeKey = bundle.freeKey, decoyCount = bundle.decoyCount,
-      flush = opts.flushConsts and true or false, flushEvery = opts.flushEvery or 65536 })
+      flush = opts.flushConsts and true or false, flushEvery = opts.flushEvery or 65536,
+      coreBlocks = CORE_BLOCKS, wm = bundle.watermarkIdx, three = bundle.threeIdx,
+      minifyFn = opts.minify and minifyTemplateText or nil, luauTypes = useTypes,
+      scatterType = scatterType })
 
-  local keyLit = "{" .. table.concat(bundle.key, ",") .. "}"
+  local vaultLit = table.concat(bundle.vault, ",")
+  local kmapLit = table.concat(bundle.kmap, ",")
   local cipherLits = {}
   for i, c in ipairs(bundle.cipherConsts) do
     -- %q leaves bytes >= 128 raw, which makes the file invalid UTF-8.
@@ -186,7 +197,16 @@ local function obfuscateOnce(source, chunkname, opts)
     base = resolveShared("base"),
   }
   header = rewriteStd(header, stdTab, stdList, stdIndex)
-  header = header:gsub("__XS_KEY__", keyLit)
+  header = header:gsub("__XS_VAULT__", vaultLit)
+  header = header:gsub("__XS_KMAP__", kmapLit)
+  header = header:gsub("__XS_SM1__", tostring(bundle.sm1))
+  header = header:gsub("__XS_SM2__", tostring(bundle.sm2))
+  header = header:gsub("__XS_VSUM__", tostring(bundle.vsum))
+  header = header:gsub("__XS_TAGN__", tostring(bundle.tagN))
+  header = header:gsub("__XS_TAGS__", tostring(bundle.tagS))
+  for nm, idx in pairs(bundle.antiIdx) do
+    header = header:gsub("__XS_NM_" .. nm:upper() .. "__", tostring(idx))
+  end
   header = header:gsub("__XS_SB__", tostring(CIPHER.basis))
   header = header:gsub("__XS_LM__", tostring(CIPHER.mult))
   header = header:gsub("__XS_LA__", tostring(CIPHER.add))
@@ -234,6 +254,8 @@ local function obfuscateOnce(source, chunkname, opts)
     return resolveShared(tok)
   end)
   footer = rewriteStd(footer, stdTab, stdList, stdIndex)
+  local tmText = useTypes and buildTypeMangler() or nil
+  header = header:gsub("__XS_TYPEMANGLER__", function() return tmText or "" end)
   header = header:gsub("__XS_STD__", function()
     if #stdList == 0 then return "" end
     return buildStdBlock(stdTab, stdList, stdNames, stdSalt)
@@ -250,15 +272,14 @@ local function obfuscateOnce(source, chunkname, opts)
 end
 
 -- Public entry point. Builds the protected file and, if the result is smaller
--- than opts.minSize (default 100000 bytes), rebuilds with a bigger `strength`
--- (decoy handler and dead-block multiplier) until it is. Pass minSize = false
--- to disable. Padding is dead code: it makes a single paste too large for a
--- one-shot read, and adds no secrecy to the logic itself.
+-- than opts.minSize, rebuilds with a bigger `strength` (decoy handler and
+-- dead-block multiplier) until it is. Off by default: padding is dead code,
+-- so it only makes a paste larger and adds no secrecy. Opt in with a size
+-- (the CLI's --min-size) when a minimum file size is actually needed.
 local function obfuscate(source, chunkname, opts)
   opts = opts or {}
   local target = opts.minSize
-  if target == nil then target = 100000 end
-  if target == false then target = 0 end
+  if target == nil or target == false then target = 0 end
   local strength = opts.strength or 1
   local out
   -- Output size is noisy from one build to the next (decoy counts are

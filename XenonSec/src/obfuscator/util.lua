@@ -7,15 +7,21 @@
 -- Small helpers
 --------------------------------------------------------------------
 
-local ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+-- Generated names use only letters and digits, never underscores, and
+-- always start with a letter. Mixed case and digits keep them from reading
+-- as words.
+local ALPHABET = "qwertyuiopasdfghjklzxcvbnmQWERTYUIOPASDFGHJKLZXCVBNM0123456789"
+local FIRST = "qwertyuiopasdfghjklzxcvbnmQWERTYUIOPASDFGHJKLZXCVBNM"
 local function randomIdent(len)
   len = len or (6 + math.random(0, 5))
   local chars = {}
-  for i = 1, len do
+  local f = math.random(1, #FIRST)
+  chars[1] = FIRST:sub(f, f)
+  for i = 2, len do
     local idx = math.random(1, #ALPHABET)
     chars[i] = ALPHABET:sub(idx, idx)
   end
-  return "_" .. table.concat(chars)
+  return table.concat(chars)
 end
 
 local function shuffledRange(n)

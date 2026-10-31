@@ -41,22 +41,39 @@ local DECOY_TEMPLATES = {
 -- 2. Split the code into basic blocks at every jump target and after every
 --    jump or return.
 -- 3. Lay the blocks out in a shuffled order (the entry block stays first),
---    and add dead decoy blocks that nothing jumps to.
+--    and add dead decoy blocks. Decoys chain into each other and into real
+--    blocks, so the dead region has edges of its own, not isolated stubs.
 -- 4. A block that could fall through gets an explicit JMP to its original
 --    successor, appended at its end. For a conditional jump, that JMP runs
 --    exactly when the condition takes the fall-through path.
--- 5. Remap every jump to the new position of its target block.
+-- 5. Opaque edges: before some of those JMPs, a conditional jump on a
+--    scratch register that is always falsy (LOADNIL + JT) or always truthy
+--    (LOADTRUE + JNIL). It is never taken, but it is a real edge to a decoy
+--    block in the graph. Blocks ending in a multi-result producer get none,
+--    since a scratch write there could clobber pending values.
+-- 6. Remap every jump to the new position of its target block.
 --------------------------------------------------------------------
+
+local OPAQUE_P = 0.5
+
+local function isMultiProducer(ins)
+	return ((ins.op == "CALL" or ins.op == "CALLM") and ins.c == 0)
+		or (ins.op == "VARARG" and ins.b == 0)
+end
 
 function Passes.flatten(mod, rng, fakeScale)
 	rng = rng or math.random
 	fakeScale = fakeScale or 1
-	local blocksTotal, fakeTotal = 0, 0
+	local blocksTotal, fakeTotal, opaqueTotal = 0, 0, 0
 
 	for _, proto in ipairs(mod.protos) do
 		local code = proto.code
 		code[#code + 1] = { op = "RET", a = 1, b = 1 }
 		local n = #code
+
+		-- One scratch register past every real one, for the opaque predicates.
+		local scratch = (proto.nregs or 0) + 1
+		proto.nregs = scratch
 
 		-- Block leaders.
 		local leaders = jumpTargets(code)
@@ -88,7 +105,8 @@ function Passes.flatten(mod, rng, fakeScale)
 		end
 		for _, kk in ipairs(rest) do layout[#layout + 1] = kk end
 
-		-- Dead decoy blocks at random layout positions (never the entry slot).
+		-- Dead decoy blocks. A decoy's successor is a real block or an earlier
+		-- decoy (keys "f<k>"), so the dead region forms its own small graph.
 		local fakeCount = math.floor(nb * 0.6 * fakeScale) + 2
 		local fakes = {}
 		for f = 1, fakeCount do
@@ -99,7 +117,13 @@ function Passes.flatten(mod, rng, fakeScale)
 				for kk, v in pairs(tpl) do copy[kk] = v end
 				body[#body + 1] = copy
 			end
-			fakes[f] = { body = body, jumpTo = rng(1, nb) }
+			local target
+			if f > 1 and rng(1, 2) == 1 then
+				target = "f" .. rng(1, f - 1)
+			else
+				target = rng(1, nb)
+			end
+			fakes[f] = { body = body, jumpTo = target }
 			local at = rng(2, #layout + 1)
 			table.insert(layout, at, { fake = f })
 		end
@@ -122,10 +146,23 @@ function Passes.flatten(mod, rng, fakeScale)
 				end
 				local last = code[blk.e]
 				if not NO_FALLTHROUGH[last.op] then
+					if not isMultiProducer(last) and rng() < OPAQUE_P then
+						local dead = "f" .. rng(1, fakeCount)
+						if rng(1, 2) == 1 then
+							out[#out + 1] = { op = "LOADNIL", a = scratch, b = 1 }
+							out[#out + 1] = { op = "JT", a = scratch }
+						else
+							out[#out + 1] = { op = "LOADTRUE", a = scratch }
+							out[#out + 1] = { op = "JNIL", a = scratch }
+						end
+						pending[#out] = { field = "b", block = dead }
+						opaqueTotal = opaqueTotal + 1
+					end
 					out[#out + 1] = { op = "JMP", a = 0 }
 					pending[#out] = { field = "a", block = item + 1 }
 				end
 			else
+				newStart["f" .. item.fake] = #out + 1
 				local fk = fakes[item.fake]
 				for _, copy in ipairs(fk.body) do out[#out + 1] = copy end
 				out[#out + 1] = { op = "JMP", a = 0 }
@@ -142,7 +179,7 @@ function Passes.flatten(mod, rng, fakeScale)
 		blocksTotal = blocksTotal + nb
 		fakeTotal = fakeTotal + fakeCount
 	end
-	return blocksTotal, fakeTotal
+	return blocksTotal, fakeTotal, opaqueTotal
 end
 
 return Passes

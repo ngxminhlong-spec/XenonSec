@@ -9,6 +9,7 @@ local %byte% = string.byte
 local %char% = string.char
 local %concat% = table.concat
 __XS_STD__
+__XS_TYPEMANGLER__
 local function %bxor%(%a%, %b%)
   local %r%, %bit%, %x%, %y% = 0, 1, %a%, %b%
   while %x% > 0 or %y% > 0 do
@@ -20,8 +21,56 @@ local function %bxor%(%a%, %b%)
   end
   return %r%
 end
-local %key% = __XS_KEY__
 local %maskA% = __XS_MASKA__
+local %tagN% = __XS_TAGN__
+local %tagS% = __XS_TAGS__
+
+-- Key vault. The key is never stored as a list. Each key byte is split into
+-- three XOR shares; every share sits at a shuffled position in one masked
+-- table, with decoy bytes filling the rest. %buildKey% rebuilds the key from
+-- those positions on each use, so the key is never held in a variable.
+local %vault% = { __XS_VAULT__ }
+local %kmap% = { __XS_KMAP__ }
+local %sm1%, %sm2% = __XS_SM1__, __XS_SM2__
+local %vsum% = __XS_VSUM__
+local %kbad% = false
+
+-- Tripwire: a weighted sum over the whole vault. Editing any byte changes it,
+-- which marks the key bad (see %corrupt%).
+local function %vaultOk%()
+  local %vs% = 0
+  for %vi% = 1, #%vault% do %vs% = (%vs% + %vault%[%vi%] * (%vi% % 7 + 1)) % 2147483647 end
+  return %vs% == %vsum%
+end
+
+local function %buildKey%()
+  local %n% = math.floor(#%kmap% / 3)
+  local %k% = {}
+  for %i% = 1, %n% do
+    local %pa% = %kmap%[%i%]
+    local %pb% = %kmap%[%n% + %i%]
+    local %pc% = %kmap%[2 * %n% + %i%]
+    local %a% = (%vault%[%pa%] - (%pa% * %sm1% + %sm2%) % 256) % 256
+    local %b% = (%vault%[%pb%] - (%pb% * %sm1% + %sm2%) % 256) % 256
+    local %c% = (%vault%[%pc%] - (%pc% * %sm1% + %sm2%) % 256) % 256
+    %k%[%i%] = %bxor%(%bxor%(%a%, %b%), %c%)
+  end
+  if %kbad% then for %i% = 1, %n% do %k%[%i%] = (%k%[%i%] + 97) % 256 end end
+  return %k%
+end
+
+-- Keyed finalizer: the checksum is folded through the key, so it only
+-- matches while the key is intact. Mirrors keyedFinal in bundle.lua.
+local function %fin%(%h%, %k%)
+  local %fa%, %fb% = 1, 0
+  for %fi% = 1, #%k% do
+    %fa% = (%fa% * 131 + %k%[%fi%] * 17 + %fi%) % 1048573
+    %fb% = (%fb% * 29 + %k%[%fi%] * (%fi% + 3)) % 2147483647
+  end
+  return (%h% * (%fa% + 1) + %fb%) % 2147483647
+end
+
+if not %vaultOk%() then %kbad% = true end
 
 -- Four-layer decrypt, undone in reverse order of how it was applied:
 -- the keyed S-box/block-permutation layer, then CFB-unchain, then the
@@ -35,14 +84,14 @@ local function %rotr8%(%rb%, %rn%)
   return ((%rb% * (2 ^ (8 - %rn%))) % 256) + math.floor(%rb% / (2 ^ %rn%))
 end
 
-local function %deriveIV%()
+local function %deriveIV%(%key%)
   local %ivv% = 0
   for %ivi% = 1, #%key% do %ivv% = %bxor%(%ivv%, %key%[%ivi%]) end
   return %ivv%
 end
 
-local function %cfbUnchain%(%s%)
-  local %out%, %prev% = {}, %deriveIV%()
+local function %cfbUnchain%(%s%, %key%)
+  local %out%, %prev% = {}, %deriveIV%(%key%)
   for %oi% = 1, #%s% do
     local %cc% = %byte%(%s%, %oi%)
     %out%[%oi%] = %char%(%bxor%(%cc%, %prev%))
@@ -53,7 +102,7 @@ end
 
 -- Key-derived LCG seed. Mirrors deriveSeed in obfuscate.lua; the constants
 -- are this build's own (see CIPHER there), not textbook values.
-local function %keySeed%()
+local function %keySeed%(%key%)
   local %kd% = __XS_SB__
   for %ki% = 1, #%key% do
     %kd% = %bxor%(%kd%, %key%[%ki%])
@@ -62,8 +111,8 @@ local function %keySeed%()
   return %kd%
 end
 
-local function %diffuseDecrypt%(%s%)
-  local %seed% = %keySeed%()
+local function %diffuseDecrypt%(%s%, %key%)
+  local %seed% = %keySeed%(%key%)
   local %out% = {}
   for %oi% = 1, #%s% do
     %seed% = (%seed% * __XS_LM__ + __XS_LA__) % 16777216
@@ -74,7 +123,7 @@ local function %diffuseDecrypt%(%s%)
   return %concat%(%out%)
 end
 
-local function %rc4Decrypt%(%s%)
+local function %rc4Decrypt%(%s%, %key%)
   local %S% = {}
   for %si% = 0, 255 do %S%[%si%] = %si% end
   local %sj%, %kl% = 0, #%key%
@@ -98,8 +147,8 @@ end
 -- within-block permutation, both derived from %key% alone. Exact
 -- mirror of obfuscate.lua's deriveSbox/deriveBlockOrder/blockPermute
 -- -- see there for why each step is there.
-local function %spnDecrypt%(%ssIn%)
-  local %sSeed% = %keySeed%()
+local function %spnDecrypt%(%ssIn%, %key%)
+  local %sSeed% = %keySeed%(%key%)
   local %sBox% = {}
   for %sbi% = 0, 255 do %sBox%[%sbi%] = %sbi% end
   for %sbj% = 255, 1, -1 do
@@ -110,7 +159,7 @@ local function %spnDecrypt%(%ssIn%)
   local %sInv% = {}
   for %sii% = 0, 255 do %sInv%[%sBox%[%sii%]] = %sii% end
 
-  local %bSeed% = %keySeed%()
+  local %bSeed% = %keySeed%(%key%)
   %bSeed% = (%bSeed% * __XS_LM__ + __XS_LA__) % 16777216
   local %sOrder% = { 1, 2, 3, 4, 5, 6, 7, 8 }
   for %soi% = 8, 2, -1 do
@@ -137,10 +186,13 @@ local function %spnDecrypt%(%ssIn%)
 end
 
 local function %decode%(%s%)
-  return %rc4Decrypt%(%diffuseDecrypt%(%cfbUnchain%(%spnDecrypt%(%s%))))
+  local %key% = %buildKey%()
+  return %rc4Decrypt%(%diffuseDecrypt%(%cfbUnchain%(%spnDecrypt%(%s%, %key%), %key%), %key%), %key%)
 end
 local %raw% = { __XS_CIPHERS__ }
 local %protos% = { __XS_PROTOS__ }
+-- Anti-debug names are encrypted constants, decoded only when used.
+local function %dname%(%di%) return (%decode%(%raw%[%di%]):sub(2)) end
 
 --------------------------------------------------------------------
 -- Anti-tamper: a checksum computed at build time over every byte of
@@ -153,7 +205,7 @@ local %protos% = { __XS_PROTOS__ }
 --------------------------------------------------------------------
 
 local %corrupt% = function()
-  for %kci% = 1, #%key% do %key%[%kci%] = (%key%[%kci%] + 97) % 256 end
+  %kbad% = true
   -- The key only protects the encrypted string/number pool -- the
   -- proto/bytecode table itself is plain literal Lua data, never
   -- decrypted via the key at all. So a tamper landing purely inside
@@ -161,9 +213,13 @@ local %corrupt% = function()
   -- Force EVERY instruction in EVERY proto to an opcode number that
   -- can never match any real one, so the very first instruction any
   -- proto executes fails immediately, no matter where the tamper was.
+  -- Poison a random third of the instructions, not all: the failure then
+  -- lands at a point that depends on the run rather than on the tamper site.
   for %cpi% = 1, #%protos% do
     local %cpc% = %protos%[%cpi%].c
-    for %cpj% = 1, #%cpc% do %cpc%[%cpj%][1] = nil end
+    for %cpj% = 1, #%cpc% do
+      if math.random(1, 3) == 1 then %cpc%[%cpj%][1] = nil end
+    end
   end
 end
 
@@ -186,18 +242,17 @@ local function %verify%()
     for %vpj% = 1, #%vpp% do %mix%(%vpp%[%vpj%][1]); %mix%(%vpp%[%vpj%][2]) end
     %mix%(%vpr%.k)
   end
-  return (not __XS_ANTITAMPER_ON__) or (%h% == __XS_CHECKSUM__)
+  return (not __XS_ANTITAMPER_ON__) or (%fin%(%h%, %buildKey%()) == __XS_CHECKSUM__)
 end
 
 if not %verify%() then %corrupt%() end
 
 --------------------------------------------------------------------
 -- Anti-debug (opt-in, see --antidebug): a debug hook set on this
--- coroutine is a strong signal of an attached debugger/profiler --
--- normal execution never sets one itself. A tight-loop timing check
--- backs it up (single-stepping/breakpoints make trivial work take
--- implausibly long). Both are guarded so a host without `debug`/`os`
--- (common in sandboxed embeddings) just skips them, no error either way.
+-- thread (or the running coroutine) is a strong signal of an attached
+-- debugger/profiler -- normal execution never sets one itself. The probe
+-- must also be the engine's own C function. A host without `debug`
+-- (common in sandboxed embeddings) just skips these checks, no error.
 --------------------------------------------------------------------
 
 -- Global access, chosen once at startup:
@@ -235,27 +290,37 @@ local %SETG% = function(%k%, %v%)
 end
 
 local %dbgLib% = nil
+local %hookFn% = nil
 if __XS_ANTIDEBUG__ then
-  local %dok%, %dlib% = pcall(function() return debug end)
-  if %dok% and %dlib% and %dlib%.gethook then %dbgLib% = %dlib% end
+  local %dok%, %dlib% = pcall(function() return %base%[%dname%(__XS_NM_DEBUG__)] end)
+  if %dok% and %dlib% then
+    local %gok%, %gfn% = pcall(function() return %dlib%[%dname%(__XS_NM_GETHOOK__)] end)
+    if %gok% and %gfn% then %dbgLib% = %dlib%; %hookFn% = %gfn% end
+  end
 end
 
--- Hook probe shared by the startup check and the periodic check that
--- runs inside the VM dispatch loop (see %ADCHECK% in VM_TEMPLATE).
+-- Hook probe shared by the startup check and the periodic check that runs
+-- inside the VM dispatch loop (see %ADCHECK%). It looks at the main hook and
+-- at the hook of the running coroutine, since a debugger can attach to either.
 local %adHook% = function()
-  if not %dbgLib% then return false end
-  local %hok%, %hfn% = pcall(%dbgLib%.gethook)
-  return (%hok% and %hfn% ~= nil) and true or false
+  if not %hookFn% then return false end
+  local %hok%, %hfn% = pcall(%hookFn%)
+  if %hok% and %hfn% ~= nil then return true end
+  local %cok%, %co% = pcall(function() return %base%[%dname%(__XS_NM_COROUTINE__)][%dname%(__XS_NM_RUNNING__)]() end)
+  if %cok% and %co% then
+    local %ghok%, %ghf% = pcall(%hookFn%, %co%)
+    if %ghok% and %ghf% ~= nil then return true end
+  end
+  return false
 end
 
+-- Native check: the hook probe must be the engine's own C function. Hook
+-- tooling is typically installed by wrapping it in a Lua function.
 if __XS_ANTIDEBUG__ then
   if %adHook%() then %corrupt%() end
-  local %ook%, %olib% = pcall(function() return os end)
-  if %ook% and %olib% and %olib%.clock then
-    local %t0% = %olib%.clock()
-    local %junk% = 0
-    for %ji% = 1, 30000 do %junk% = %junk% + %ji% end
-    if (%olib%.clock() - %t0%) > 0.35 then %corrupt%() end
+  if %dbgLib% and %hookFn% then
+    local %nok%, %ninfo% = pcall(function() return %dbgLib%[%dname%(__XS_NM_GETINFO__)](%hookFn%, "S") end)
+    if %nok% and %ninfo% and %ninfo%.what ~= "C" then %corrupt%() end
   end
 end
 
@@ -263,9 +328,9 @@ end
 -- program never touches is never decrypted at all.
 local %consts% = setmetatable({}, { __index = function(%ct%, %i2%)
   local %dv% = %decode%(%raw%[%i2%])
-  local %tg% = %dv%:sub(1, 1)
+  local %tg% = %dv%:byte(1)
   local %val%
-  if %tg% == "N" then %val% = tonumber(%dv%:sub(2)) - %maskA% else %val% = %dv%:sub(2) end
+  if %tg% == %tagN% then %val% = tonumber(%dv%:sub(2)) - %maskA% else %val% = %dv%:sub(2) end
   rawset(%ct%, %i2%, %val%)
   return %val%
 end })

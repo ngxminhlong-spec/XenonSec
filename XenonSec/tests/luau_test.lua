@@ -41,7 +41,7 @@ local pass, total = 0, 0
 local function t(name, luauSrc, plainOracleSrc)
   total = total + 1
   local nativeOut, nativeErr = captureNative(plainOracleSrc)
-  local ok1, outSrc = pcall(Obf.obfuscate, luauSrc, name, { luau = true })
+  local ok1, outSrc = pcall(Obf.obfuscate, luauSrc, name, { luau = true, typeMangler = false })
   if not ok1 then
     print("[FAIL] " .. name .. " -- obfuscate failed: " .. tostring(outSrc))
     return
@@ -321,7 +321,7 @@ do
   -- and must not break parsing. It's skipped, and later lines keep their
   -- original numbering.
   local src = '#!/usr/bin/env lute\nlocal t = 0\nfor i = 1, 5 do t += i end\nprint(t)\n'
-  local ok, out = pcall(Obf.obfuscate, src, "sb", { luau = true })
+  local ok, out = pcall(Obf.obfuscate, src, "sb", { luau = true, typeMangler = false })
   check("shebang line is accepted in Luau mode", ok, tostring(out))
   if ok then
     local chunk = load(out, "sb", "t")
@@ -344,7 +344,7 @@ do
   -- where _G is the live environment (Lua 5.1 / 5.3 / Lune), and must not
   -- break anything where it isn't (Lute), where raw code sees nil too.
   local src = "x = 1\nprint(rawget(_G, 'x'))\n"
-  local ok, out = pcall(Obf.obfuscate, src, "gr", { luau = true })
+  local ok, out = pcall(Obf.obfuscate, src, "gr", { luau = true, typeMangler = false })
   total = total + 1
   if not ok then print("[FAIL] _G read-back build -- " .. tostring(out))
   else
