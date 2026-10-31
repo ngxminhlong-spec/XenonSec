@@ -189,6 +189,44 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       return KV.luauTypes and ": { number }" or ""
     end
     if tok == "CORE_HANDLERS" then return renderCoreHandlers() end
+    -- MBA (mixed Boolean-arithmetic) for + and -. For non-negative integers
+    -- below 2^26 the operator is computed from bitwise identities, so the
+    -- dispatcher never holds a plain + or - for those operands:
+    --   a + b = (a ^ b) + 2*(a & b)
+    --   a - b = (a ^ b) - 2*b + 2*(a & b)
+    -- Every other operand (floats, negatives, huge values, strings, tables with
+    -- metamethods) takes the real operator, so Lua semantics are unchanged.
+    -- The "+ a*0 + b*0" term keeps float results as floats on Lua 5.3.
+    if tok == "MBA_HELPERS" then
+      if not (KV and KV.mba) then return "" end
+      local BX, BA = ensureName("bxor"), ensureName("band")
+      local OK, AD, SB = ensureName("mbaOk"), ensureName("mbaAdd"), ensureName("mbaSub")
+      return table.concat({
+        "local function " .. BA .. "(x, y)",
+        "  local r, bit = 0, 1",
+        "  while x > 0 and y > 0 do",
+        "    local xb, yb = x % 2, y % 2",
+        "    if xb == 1 and yb == 1 then r = r + bit end",
+        "    x = (x - xb) / 2; y = (y - yb) / 2; bit = bit * 2",
+        "  end",
+        "  return r",
+        "end",
+        "local function " .. OK .. "(x, y)",
+        "  return type(x) == 'number' and type(y) == 'number' and x >= 0 and y >= 0 and x < 67108864 and y < 67108864 and x % 1 == 0 and y % 1 == 0",
+        "end",
+        "local function " .. AD .. "(x, y) return " .. BX .. "(x, y) + 2 * " .. BA .. "(x, y) end",
+        "local function " .. SB .. "(x, y) return " .. BX .. "(x, y) - 2 * y + 2 * " .. BA .. "(x, y) end",
+      }, "\n")
+    end
+    if tok == "ARITH_ADD" or tok == "ARITH_SUB" then
+      local a, b = ensureName("a"), ensureName("b")
+      local op = (tok == "ARITH_ADD") and "+" or "-"
+      if not (KV and KV.mba) then return "return " .. a .. " " .. op .. " " .. b end
+      local OK = ensureName("mbaOk")
+      local fn = ensureName(tok == "ARITH_ADD" and "mbaAdd" or "mbaSub")
+      return string.format("if %s(%s, %s) then return %s(%s, %s) + %s * 0 + %s * 0 end return %s %s %s",
+        OK, a, b, fn, a, b, a, b, a, op, b)
+    end
     if tok == "HANDLER_SELFTEST" then return renderSelfTest(ensureName, OPNUM, BINNUM, UNNUM, KV) end
     if tok == "OPALIASES" then return renderOpAliases() end
     if tok == "ADCHECK" then

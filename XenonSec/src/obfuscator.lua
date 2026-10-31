@@ -151,7 +151,7 @@ local function obfuscateOnce(source, chunkname, opts)
   local proxyA = 2 * math.random(0, 524287) + 1
   local proxyB = math.random(0, PROXY_M - 1)
   local engineSrc = renderTemplate(vmSrc, bundle.OPNUM, bundle.BINNUM, bundle.UNNUM, totalInstr, opts.antiDebug,
-    { M1 = bundle.saltM1, M2 = bundle.saltM2, M3 = bundle.saltM3, SA = bundle.stepA, SB = bundle.stepB, SC = bundle.stepC, MOD = bundle.mod, strength = opts.strength or 1,
+    { mba = opts.mba ~= false, M1 = bundle.saltM1, M2 = bundle.saltM2, M3 = bundle.saltM3, SA = bundle.stepA, SB = bundle.stepB, SC = bundle.stepC, MOD = bundle.mod, strength = opts.strength or 1,
       proxify = opts.proxify and true or false, PA = proxyA, PB = proxyB, PM = PROXY_M,
       freeKey = bundle.freeKey, decoyCount = bundle.decoyCount,
       flush = opts.flushConsts and true or false, flushEvery = opts.flushEvery or 65536,
