@@ -185,14 +185,60 @@ local function %spnDecrypt%(%ssIn%, %key%)
   return %concat%(%sOut%)
 end
 
-local function %decode%(%s%)
-  local %key% = %buildKey%()
+local function %decodeK%(%s%, %key%)
   return %rc4Decrypt%(%diffuseDecrypt%(%cfbUnchain%(%spnDecrypt%(%s%, %key%), %key%), %key%), %key%)
+end
+local function %decode%(%s%)
+  return %decodeK%(%s%, %buildKey%())
 end
 local %raw% = { __XS_CIPHERS__ }
 local %protos% = { __XS_PROTOS__ }
 -- Anti-debug names are encrypted constants, decoded only when used.
 local function %dname%(%di%) return (%decode%(%raw%[%di%]):sub(2)) end
+
+-- Per-proto key: the build key mixed with the proto's nonce, using the same
+-- LCG as the key seed. Mirrors deriveProtoKey in bundle.lua.
+local function %pkey%(%key%, %nn%)
+  local %ps% = (__XS_SB__ + %nn%) % 16777216
+  local %pko% = {}
+  for %pki% = 1, #%key% do
+    %ps% = (%ps% * __XS_LM__ + __XS_LA__) % 16777216
+    %pko%[%pki%] = %bxor%(%key%[%pki%], math.floor(%ps% / 65536) % 256)
+  end
+  return %pko%
+end
+
+-- Lazy proto decode, called by the engine the first time a proto runs. The
+-- blob is decrypted and unpacked into instructions. The decoded tuples are
+-- hashed and compared with the proto's stored hash (field i) before anything
+-- can run them; a mismatch leaves no usable opcodes.
+local function %dproto%(%pr%)
+  local %pk% = %pkey%(%buildKey%(), %pr%.n)
+  local %plain% = %decodeK%(%pr%.b, %pk%)
+  local %code% = {}
+  local %dh% = 5381
+  local function %hm%(%n%) %dh% = (%dh% * 31 + (%n% or 0)) % 2147483647 end
+  for %ci% = 1, math.floor(#%plain% / 15) do
+    local %base% = (%ci% - 1) * 15
+    local %f% = {}
+    for %fi% = 1, 5 do
+      local %o% = %base% + (%fi% - 1) * 3
+      %f%[%fi%] = %byte%(%plain%, %o% + 1) * 65536 + %byte%(%plain%, %o% + 2) * 256 + %byte%(%plain%, %o% + 3)
+    end
+    %hm%(%f%[5]); %hm%(%f%[1]); %hm%(%f%[2]); %hm%(%f%[3]); %hm%(%f%[4])
+    %code%[%ci%] = %f%
+  end
+  if %dh% ~= %pr%.i then
+    for %ci% = 1, #%code% do %code%[%ci%][1] = nil end
+  end
+  return %code%
+end
+
+-- Called by the engine on tamper: the key goes bad, so every proto decoded
+-- after this point comes out with unusable opcodes.
+local function %poison%()
+  %kbad% = true
+end
 
 --------------------------------------------------------------------
 -- Anti-tamper: a checksum computed at build time over every byte of
@@ -217,8 +263,10 @@ local %corrupt% = function()
   -- lands at a point that depends on the run rather than on the tamper site.
   for %cpi% = 1, #%protos% do
     local %cpc% = %protos%[%cpi%].c
-    for %cpj% = 1, #%cpc% do
-      if math.random(1, 3) == 1 then %cpc%[%cpj%][1] = nil end
+    if %cpc% then
+      for %cpj% = 1, #%cpc% do
+        if math.random(1, 3) == 1 then %cpc%[%cpj%][1] = nil end
+      end
     end
   end
 end
@@ -233,11 +281,9 @@ local function %verify%()
   for %vpi% = 1, #%protos% do
     local %vpr% = %protos%[%vpi%]
     %mix%(%vpr%.v and 1 or 0)
-    local %vpc% = %vpr%.c
-    for %vpk% = 1, #%vpc% do
-      local %vins% = %vpc%[%vpk%]
-      %mix%(%vins%[5]); %mix%(%vins%[1]); %mix%(%vins%[2]); %mix%(%vins%[3]); %mix%(%vins%[4])
-    end
+    %mix%(%vpr%.n)
+    local %vpb% = %vpr%.b
+    for %vbj% = 1, #%vpb% do %mix%(%byte%(%vpb%, %vbj%)) end
     local %vpp% = %vpr%.p
     for %vpj% = 1, #%vpp% do %mix%(%vpp%[%vpj%][1]); %mix%(%vpp%[%vpj%][2]) end
     %mix%(%vpr%.k)

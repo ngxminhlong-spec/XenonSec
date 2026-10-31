@@ -74,9 +74,10 @@ local function %run%(%mod%, ...)
   local %GETG% = %mod%[5]
   local %SETG% = %mod%[6]
   local %brick% = function()
+    %mod%[8]()
     for %bi% = 1, #%protos% do
       local %bc% = %protos%[%bi%].c
-      for %bj% = 1, #%bc% do %bc%[%bj%][1] = nil end
+      if %bc% then for %bj% = 1, #%bc% do %bc%[%bj%][1] = nil end end
     end
   end
 
@@ -112,12 +113,20 @@ local function %run%(%mod%, ...)
     local %hh% = 5381
     local function %mm%(%n%) %hh% = (%hh% * 31 + (%n% or 0)) % 2147483647 end
     %mm%(%pp%.v and 1 or 0)
-    for %vk% = 1, #%pp%.c do
-      local %vi% = %pp%.c[%vk%]
-      %mm%(%vi%[5]); %mm%(%vi%[1]); %mm%(%vi%[2]); %mm%(%vi%[3]); %mm%(%vi%[4])
-    end
+    %mm%(%pp%.n)
+    for %vk% = 1, #%pp%.b do %mm%(%byte%(%pp%.b, %vk%)) end
     for %vj% = 1, #%pp%.p do %mm%(%pp%.p[%vj%][1]); %mm%(%pp%.p[%vj%][2]) end
-    return %hh% == %pp%.k
+    -- Decoded code, if present, must still hash to the value stored at build
+    -- time. This catches edits made to the live tuples after the first call.
+    local %ch% = 5381
+    local function %cm%(%n%) %ch% = (%ch% * 31 + (%n% or 0)) % 2147483647 end
+    if %pp%.c then
+      for %ck% = 1, #%pp%.c do
+        local %cins% = %pp%.c[%ck%]
+        %cm%(%cins%[5]); %cm%(%cins%[1]); %cm%(%cins%[2]); %cm%(%cins%[3]); %cm%(%cins%[4])
+      end
+    end
+    return %hh% == %pp%.k and (not %pp%.c or %ch% == %pp%.i)
   end
 
   -- Handler table: one handler per opcode, keyed by its per-build number.
@@ -134,6 +143,7 @@ local function %run%(%mod%, ...)
 
   %runProto% = function(%protoIdx%, %callArgs%, %parentScope%)
     local %proto% = %protos%[%protoIdx%]
+    if not %proto%.c then %proto%.c = %mod%[7](%proto%) end
     local %F% = {
       %code% = %proto%.c, %ip% = 1, %regs% = %NEWREGS%, %top% = 0,
       %scope% = { %varsField% = %NEWVARS%, %parentField% = %parentScope% },

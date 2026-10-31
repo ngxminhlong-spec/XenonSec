@@ -44,13 +44,18 @@ print(x)
   check("untampered output runs correctly", ok1 and output1 == "hello world\n42",
     ("ok=%s output=%s"):format(tostring(ok1), tostring(output1)))
 
-  -- Tamper a byte squarely inside the first bytecode instruction tuple.
-  local tuplePos = out:find("{%d+,%d+,%d+,%d+,%d+}")  -- {op,a,b,c,seed}
-  check("found a bytecode tuple to tamper", tuplePos ~= nil)
+  -- Tamper a character inside the first proto's encrypted code blob (b="...").
+  -- Code is stored only as ciphertext, so this is the bytecode to attack.
+  local blobStart = out:find('b="', 1, true)
+  check("found an encrypted code blob to tamper", blobStart ~= nil)
+  local tuplePos = blobStart and out:find("[%w]", blobStart + 3)
   if tuplePos then
-    local pos = tuplePos -- position of the opening '{'... flip the char right after it
-    local origByte = out:byte(pos + 2)
-    local tampered = out:sub(1, pos + 1) .. string.char((origByte + 5) % 256) .. out:sub(pos + 3)
+    local c = out:sub(tuplePos, tuplePos)
+    local r
+    if c:match("%d") then r = tostring((tonumber(c) + 1) % 10)
+    elseif c == "z" then r = "a" elseif c == "Z" then r = "A"
+    else r = string.char(c:byte() + 1) end
+    local tampered = out:sub(1, tuplePos - 1) .. r .. out:sub(tuplePos + 1)
     local chunk, loadErr = load(tampered, "t2")
     if not chunk then
       check("tampered bytecode fails safely (load-time)", true)
