@@ -100,7 +100,7 @@ Runtime notes:
 | **Single closure** | The whole file is `return (function(...) ... end)(...)`. Nothing from the program sits at the chunk's top level. |
 | **Anti-tamper** | On by default. See [Anti-tamper](#anti-tamper-on-by-default). |
 | **Anti-debug** | Opt-in with `--antidebug`. See [Anti-debug](#anti-debug-opt-in---antidebug). |
-| **Minification** | The VM and header scaffolding is stripped of comments and collapsed before the encrypted payload is spliced in. |
+| **Minification** | The VM and header scaffolding is minified token by token: comments are dropped (the watermark comment stays), spacing is cut to what Lua needs, and integer literals of 1000 or more are masked as arithmetic with a per-build key. Minification runs before the encrypted payload is spliced in. |
 
 Everything above is on by default, except anti-debug and proxify. Each layer
 can be turned off individually through the flags above or the `opts` table on

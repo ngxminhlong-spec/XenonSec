@@ -181,5 +181,22 @@ print(acc)
   check("flatten emits opaque never-taken edges", opaqueSeen > 0, "no opaque edges in 20 layouts")
 end
 
+-- Template minifier: comments dropped (watermark kept), tokens that would merge
+-- stay apart, placeholders stay whole, large literals masked.
+do
+  local Min = dofile(SRC .. "obfuscator/minify.lua")
+  local function m(src, mask) return Min.minify(src, mask or false) end
+  check("minify: '- -' keeps a space (no -- comment)", m("a = 1 - -b") == "a=1- -b")
+  check("minify: number before '..' keeps a space", m("x = 1 .. y") == "x=1 ..y")
+  check("minify: string containing -- is kept verbatim", m("local s = 'a -- b' -- c") == "local s='a -- b'")
+  check("minify: long string kept verbatim", m("local t = [[ k -- x ]] x = 2"):find("[[ k -- x ]]", 1, true) ~= nil)
+  check("minify: placeholders stay whole", m("local %v% = %w% + 1"):find("%v%", 1, true) ~= nil)
+  check("minify: watermark comment kept", m("--[[Protected by XenonSec]]\nlocal q = 3"):sub(1, 13) == "--[[Protected")
+  check("minify: small literals not masked", m("return 999", true) == "return 999")
+  local masked = m("return 5000", true)
+  local ok = masked:match("^return%(%(5000%+(%d+)%)%-(%d+)%)$")
+  check("minify: large literal masked as ((n+k)-k)", ok ~= nil)
+end
+
 print()
 print(pass .. " / " .. total .. " pass-level tests passed")

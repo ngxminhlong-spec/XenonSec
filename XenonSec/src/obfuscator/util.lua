@@ -70,22 +70,12 @@ end
 
 --------------------------------------------------------------------
 
+local minifyMod = dofile((debug.getinfo(1, "S").source:match("@?(.*/)") or "./") .. "minify.lua")
+
+-- Token-aware template minifier (see minify.lua). Integer literals of 1000 or
+-- more are masked as arithmetic with a fresh per-call key.
 local function minifyTemplateText(text)
-  local lines = {}
-  for line in (text .. "\n"):gmatch("(.-)\n") do
-    local trimmed = line:match("^%s*(.-)%s*$")
-    if trimmed ~= "" and not (trimmed:sub(1, 2) == "--" and trimmed:sub(1, 4) ~= "--[[" and trimmed:sub(1, 4) ~= "--]]") then
-      trimmed = trimmed:gsub("%s+", " ")
-      lines[#lines + 1] = trimmed
-    end
-  end
-  -- Heavy mode: join every statement with a single space instead of a
-  -- newline, collapsing the whole template to one dense line. A plain
-  -- space is always a safe token separator in Lua regardless of what
-  -- the two adjacent tokens are, so this can never glue two tokens
-  -- together incorrectly -- it just removes every newline/indent byte
-  -- that isn't doing any syntactic work.
-  return table.concat(lines, " ")
+  return minifyMod.minify(text, true)
 end
 
 return {

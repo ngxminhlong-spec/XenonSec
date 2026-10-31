@@ -102,11 +102,15 @@ end
 do
   local out = Obf.obfuscate('print("x")', "t", { minSize = false, strength = 2 })
   local count, maxKey = 0, 0
-  for k in out:gmatch("%[(%d+)%] = function%(") do
-    local v = tonumber(k)
+  -- Minified builds write a masked key as ((n+k)-k); read both forms so the
+  -- base-opcode keys (masked to arithmetic) are still counted.
+  local function take(v)
+    v = tonumber(v)
     count = count + 1
     if v > maxKey then maxKey = v end
   end
+  for k in out:gmatch("%[(%d+)%]%s*=%s*function%(") do take(k) end
+  for k in out:gmatch("%[%(%((%d+)%+%d+%)%-%d+%)%]%s*=%s*function%(") do take(k) end
   check("literal handler keys stay inside the dense pool bound",
     count > 0 and maxKey <= count + 28, ("literal keys=%d largest=%d"):format(count, maxKey))
 end
