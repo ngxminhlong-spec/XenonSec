@@ -15,14 +15,14 @@
 --     (if any) is kept as a bare statement, a side-effect-free RHS is
 --     dropped entirely.
 --
--- What this deliberately does NOT do: build phi-functions at the
--- merge points of if/while/for (that's full whole-function SSA with
--- control-flow-graph construction -- a materially bigger project).
--- Every nested control-flow construct (if/while/for/repeat/do/
--- function) is treated as an opacity barrier: propagation never
--- crosses into or out of one. This is what keeps the pass simple
--- *and* unconditionally safe -- it only ever reasons about code that
--- really does execute as one straight, unbranching sequence.
+-- Propagation crosses control flow in the following ways, all
+-- conservative (see "Cross-branch propagation" below): values flow into
+-- if/do/loop bodies, a merge after an if keeps only the values that every
+-- falling-through branch agrees on (a phi of identical inputs), and an
+-- if whose condition is a literal after propagation is collapsed. Loop
+-- bodies get no value that the loop itself can change between iterations,
+-- so loop-carried values are never merged, and full phi-functions for
+-- loop headers (with fixed-point iteration) are not built.
 --
 -- Run this AFTER fold.lua (so literal arithmetic is already reduced)
 -- and run fold.lua again afterward (propagating a copied literal into
@@ -343,33 +343,16 @@ end
 -- crosses a control-flow barrier.
 --------------------------------------------------------------------
 
-local function recurseIntoNestedBlocks(stat)
-  local kind = stat.kind
-  if kind == "Do" then
-    optimizeBlock(stat.body)
-  elseif kind == "If" then
-    for _, clause in ipairs(stat.clauses) do optimizeBlock(clause.body) end
-    if stat.elseBody then optimizeBlock(stat.elseBody) end
-  elseif kind == "While" then
-    optimizeBlock(stat.body)
-  elseif kind == "Repeat" then
-    optimizeBlock(stat.body)
-  elseif kind == "NumericFor" then
-    optimizeBlock(stat.body)
-  elseif kind == "GenericFor" then
-    optimizeBlock(stat.body)
-  elseif kind == "LocalFunction" then
-    if stat.func.kind == "Function" then optimizeBlock(stat.func.body) end
-  end
-  -- Function-literal RHS values inside Local/Assign/ExprStat/Return/Table
-  -- are reached via a generic sweep below (walkFunctionsIn), since they
-  -- can appear anywhere an expression can.
+local function paramSet(params)
+  local set = {}
+  for _, p in ipairs(params or {}) do set[p] = true end
+  return set
 end
 
 local function walkFunctionsInExpr(node)
   local kind = node.kind
   if kind == "Function" then
-    optimizeBlock(node.body)
+    optimizeBlock(node.body, nil, nil, paramSet(node.params))
   elseif kind == "Index" then
     walkFunctionsInExpr(node.obj); walkFunctionsInExpr(node.key)
   elseif kind == "Paren" then
@@ -501,135 +484,341 @@ local function invalidateFromNested(stat, env)
   for name in pairs(names) do env[name] = nil end
 end
 
-function optimizeBlock(block)
-  local env = {} -- name -> tracked pure expr, only while provably still valid
+--------------------------------------------------------------------
+-- Cross-branch propagation. Values flow into nested blocks and back
+-- out, under these rules (each one is conservative):
+--
+--   * A nested block starts from the environment that is valid at its
+--     entry point.
+--   * An if/elseif/else, and a do-block, leaves behind the phi of its
+--     branches: a name keeps a tracked value only if every branch that
+--     can fall through ends with the same literal for it. An implicit
+--     empty else counts as a branch that changes nothing.
+--   * A loop body starts from the entry environment minus everything
+--     the loop can change between iterations: names assigned anywhere
+--     in the loop, names the body declares, the loop variables, and
+--     every captured name when the loop calls anything.
+--   * A condition that is a literal after propagation decides its if:
+--     dead clauses are dropped, and a surviving first clause collapses
+--     the whole statement into a do-block.
+--------------------------------------------------------------------
+
+local function copyEnv(env)
+  local out = {}
+  for k, v in pairs(env) do out[k] = v end
+  return out
+end
+
+-- The environment for a statement that calls something: a call can
+-- change captured names before a later part of the same statement reads
+-- them, so those reads are left alone.
+local function withoutCaptured(env)
+  local out = {}
+  for k, v in pairs(env) do
+    if not capturedNames[k] then out[k] = v end
+  end
+  return out
+end
+
+-- Canonical text of a tracked value, so two branch results can be
+-- compared. Anything untrackable gets a unique key and never compares equal.
+local function valueKey(node)
+  if node == nil then return nil end
+  local kind = node.kind
+  if kind == "Number" then return "N" .. tostring(node.value)
+  elseif kind == "String" then return "S" .. string.format("%q", node.value)
+  elseif kind == "Nil" then return "nil"
+  elseif kind == "True" then return "true"
+  elseif kind == "False" then return "false"
+  elseif kind == "Paren" then return "(" .. tostring(valueKey(node.expr)) .. ")"
+  elseif kind == "Binop" then
+    return "(" .. tostring(valueKey(node.lhs)) .. node.op .. tostring(valueKey(node.rhs)) .. ")"
+  elseif kind == "Unop" then
+    return "(" .. node.op .. tostring(valueKey(node.operand)) .. ")"
+  end
+  return "?" .. tostring(node)
+end
+
+-- Names a block declares at its top level. They shadow outer names, so
+-- their values must never leak out of the block.
+local function declaredNames(block)
+  local names = {}
+  for _, s in ipairs(block.body) do
+    if s.kind == "Local" then
+      for _, n in ipairs(s.names) do names[n] = true end
+    elseif s.kind == "LocalFunction" then
+      names[s.name] = true
+    end
+  end
+  return names
+end
+
+-- true or false when a literal decides a condition; nil otherwise.
+local function constTruth(node)
+  local kind = node.kind
+  if kind == "Nil" or kind == "False" then return false end
+  if kind == "Number" or kind == "String" or kind == "True" then return true end
+  return nil
+end
+
+local blockContainsCall
+local function statContainsCallDeep(s)
+  if statementContainsCall(s) then return true end
+  local kind = s.kind
+  if kind == "Repeat" then
+    return exprContainsCall(s.cond) or blockContainsCall(s.body)
+  elseif kind == "Do" or kind == "While" or kind == "NumericFor" or kind == "GenericFor" then
+    return blockContainsCall(s.body)
+  elseif kind == "If" then
+    for _, c in ipairs(s.clauses) do
+      if blockContainsCall(c.body) then return true end
+    end
+    return s.elseBody ~= nil and blockContainsCall(s.elseBody)
+  end
+  return false
+end
+
+function blockContainsCall(block)
+  for _, s in ipairs(block.body) do
+    if statContainsCallDeep(s) then return true end
+  end
+  return false
+end
+
+-- The environment that is valid at the start of EVERY iteration of a loop.
+local function loopEntryEnv(env, body, cond, loopVars)
+  local e = copyEnv(env)
+  local assigned = {}
+  collectAssignTargetsBlock(body, assigned)
+  for name in pairs(assigned) do e[name] = nil end
+  for name in pairs(declaredNames(body)) do e[name] = nil end
+  for _, name in ipairs(loopVars) do e[name] = nil end
+  if blockContainsCall(body) or (cond ~= nil and exprContainsCall(cond)) then
+    for name in pairs(capturedNames) do e[name] = nil end
+  end
+  return e
+end
+
+-- What one branch of a construct leaves behind: its exit environment,
+-- whether it can fall through, and the names it declares at top level.
+local function branchResult(block, entry, scope)
+  local kill = declaredNames(block)
+  local exit = optimizeBlock(block, entry, nil, scope)
+  local last = block.body[#block.body]
+  local terminates = last ~= nil and (last.kind == "Return" or last.kind == "Break"
+    or last.kind == "Continue")
+  return { env = exit, kill = kill, terminates = terminates }
+end
+
+-- Replaces env with the phi of the branches (all entered with `pre`):
+-- a name keeps its value only where every falling-through branch agrees.
+local function mergeBranches(env, pre, branches)
+  local fall = {}
+  for _, b in ipairs(branches) do
+    if not b.terminates then fall[#fall + 1] = b end
+  end
+  for k in pairs(env) do env[k] = nil end
+  if #fall == 0 then return end -- every path leaves: nothing after this point runs
+  for name in pairs(pre) do
+    local first, agreed = nil, true
+    for idx, b in ipairs(fall) do
+      local v = (not b.kill[name]) and b.env[name] or nil
+      if idx == 1 then
+        first = v
+      elseif valueKey(v) ~= valueKey(first) then
+        agreed = false
+        break
+      end
+    end
+    if agreed and first ~= nil then env[name] = first end
+  end
+end
+
+local function emptyDo(s)
+  return { kind = "Do", body = { kind = "Block", body = {} }, line = s.line }
+end
+
+-- Drops clauses whose condition is a false literal, and collapses the if
+-- when a true literal decides it. Returns the statement that replaces s.
+local function simplifyIf(s)
+  local kept = {}
+  for _, c in ipairs(s.clauses) do
+    local t = constTruth(c.cond)
+    if t == true then
+      if #kept == 0 then return { kind = "Do", body = c.body, line = s.line } end
+      return { kind = "If", clauses = kept, elseBody = c.body, line = s.line }
+    elseif t == nil then
+      kept[#kept + 1] = c
+    end
+  end
+  if #kept == 0 then
+    if s.elseBody then return { kind = "Do", body = s.elseBody, line = s.line } end
+    return emptyDo(s)
+  end
+  return { kind = "If", clauses = kept, elseBody = s.elseBody, line = s.line }
+end
+
+--------------------------------------------------------------------
+-- Optimize one block. `entryEnv` is the environment valid where the
+-- block starts (nil for a function body, which starts fresh). `tail`
+-- lists statements that run inside this block's scope after its last
+-- statement (a repeat-until condition), so they count as reads. Returns
+-- the environment valid where the block ends.
+--------------------------------------------------------------------
+
+function optimizeBlock(block, entryEnv, tail, scope)
+  local env = entryEnv and copyEnv(entryEnv) or {}
+  -- Names that are locals at this point. Only these may be tracked on
+  -- assignment: an assigned global can be changed by code this pass
+  -- never sees, so it is never a candidate.
+  local locals = copyEnv(scope or {})
   local stmts = block.body
   local out = {}
 
   for i = 1, #stmts do
     local s = stmts[i]
+    local subEnv = statementContainsCall(s) and withoutCaptured(env) or env
 
     -- Propagate known values into this statement's own expressions
-    -- BEFORE interpreting what it defines/invalidates.
-    --
-    -- IMPORTANT: a `while`/`repeat` condition re-evaluates on every
-    -- iteration, seeing whatever the body most recently assigned --
-    -- so it must never be substituted using a value the body itself
-    -- reassigns (that would freeze a loop-carried variable at its
-    -- pre-loop value forever, e.g. turning `while i < n` into a
-    -- permanently-true `while 0 < 3`). NumericFor/GenericFor's
-    -- start/limit/step/exprs, by contrast, really do only evaluate
-    -- once at loop entry, so substituting the current env there is
-    -- correct. Likewise every If clause's cond only ever evaluates
-    -- once, before this If's own body has had a chance to run.
+    -- BEFORE interpreting what it defines or invalidates. A while or
+    -- repeat condition re-evaluates every iteration, so it only sees
+    -- values the loop cannot change (see loopEntryEnv).
     if s.kind == "Local" then
-      substList(s.values, env)
-    elseif s.kind == "LocalFunction" then
-      -- name is bound before the body per Lua semantics; body is a
-      -- barrier anyway (handled by walkFunctionsIn / recurse below)
+      substList(s.values, subEnv)
     elseif s.kind == "Assign" then
-      substList(s.values, env)
+      substList(s.values, subEnv)
       for _, tgt in ipairs(s.targets) do
         if tgt.kind == "Index" then
-          tgt.obj = substExpr(tgt.obj, env)
-          tgt.key = substExpr(tgt.key, env)
+          tgt.obj = substExpr(tgt.obj, subEnv)
+          tgt.key = substExpr(tgt.key, subEnv)
         end
       end
     elseif s.kind == "ExprStat" then
-      s.expr = substExpr(s.expr, env)
+      s.expr = substExpr(s.expr, subEnv)
     elseif s.kind == "If" then
-      for _, c in ipairs(s.clauses) do c.cond = substExpr(c.cond, env) end
+      for _, c in ipairs(s.clauses) do c.cond = substExpr(c.cond, subEnv) end
     elseif s.kind == "While" then
-      local loopSafeEnv = {}
-      for k, v in pairs(env) do loopSafeEnv[k] = v end
-      local assigned = {}
-      collectAssignTargetsBlock(s.body, assigned)
-      for name in pairs(assigned) do loopSafeEnv[name] = nil end
-      s.cond = substExpr(s.cond, loopSafeEnv)
+      s.cond = substExpr(s.cond, loopEntryEnv(env, s.body, s.cond, {}))
     elseif s.kind == "NumericFor" then
-      s.start = substExpr(s.start, env)
-      s.limit = substExpr(s.limit, env)
-      if s.step then s.step = substExpr(s.step, env) end
+      s.start = substExpr(s.start, subEnv)
+      s.limit = substExpr(s.limit, subEnv)
+      if s.step then s.step = substExpr(s.step, subEnv) end
     elseif s.kind == "GenericFor" then
-      substList(s.exprs, env)
+      substList(s.exprs, subEnv)
     elseif s.kind == "Return" then
-      substList(s.args, env)
+      substList(s.args, subEnv)
     end
-    -- Repeat's cond is handled after recursing into its body (it can
-    -- read the body's own locals); Do/Break need no substitution here.
 
-    -- Now recurse into any nested block/function bodies (each gets its
-    -- own fresh environment -- propagation never crosses this line).
-    recurseIntoNestedBlocks(s)
+    -- A condition that became a literal decides its if (or while).
+    if s.kind == "If" then
+      s = simplifyIf(s)
+    elseif s.kind == "While" and constTruth(s.cond) == false then
+      s = emptyDo(s)
+    end
+
+    -- Closures get their own fresh environment; the expression sweep
+    -- also reaches closures in conditions and headers.
     walkFunctionsInStat(s)
-    if s.kind == "Repeat" then
-      -- Same loop-carried hazard as While: repeat's `until` condition
-      -- re-evaluates every iteration too, after the body has already
-      -- run at least once, so it must not see pre-loop values for
-      -- anything the body reassigns.
-      local loopSafeEnv = {}
-      for k, v in pairs(env) do loopSafeEnv[k] = v end
-      local assigned = {}
-      collectAssignTargetsBlock(s.body, assigned)
-      for name in pairs(assigned) do loopSafeEnv[name] = nil end
-      s.cond = substExpr(s.cond, loopSafeEnv)
+    if s.kind == "LocalFunction" and s.func.kind == "Function" then
+      optimizeBlock(s.func.body, nil, nil, paramSet(s.func.params))
     end
 
-    -- Anything reassigned anywhere inside a nested body can no longer
-    -- be trusted to hold its previously-tracked value from here on.
-    if s.kind == "If" or s.kind == "While" or s.kind == "Repeat"
-      or s.kind == "NumericFor" or s.kind == "GenericFor" or s.kind == "Do" then
-      invalidateFromNested(s, env)
-    end
-
-    -- A function call anywhere in this statement could, through a
-    -- closure, mutate any variable that's captured anywhere in the
-    -- program -- even ones with no visible call between their tracked
-    -- definition and here. See the module banner comment for why this
-    -- check exists (it's fixing a real bug that was found here).
-    invalidateCapturedAfterCall(s, env)
-
-    -- Decide what this statement does to `env` going forward, and
-    -- whether a dead `local` can be eliminated.
-    local handled = false
-    if s.kind == "Local" and #s.names == 1 and #s.values <= 1 then
-      local name = s.names[1]
-      local val = s.values[1]
-      local isDead = not blockHasRead({ body = sliceFrom(stmts, i + 1) }, name)
-        and not restOfBlockCaptures(stmts, i + 1, name)
-
-      if isDead then
-        if val ~= nil and not isSideEffectFree(val) then
-          out[#out + 1] = { kind = "ExprStat", expr = val, line = s.line }
-        end
-        -- else: fully removable, no observable effect lost
-        handled = true
+    if s.kind == "If" then
+      invalidateCapturedAfterCall(s, env)
+      local pre = copyEnv(env)
+      local branches = {}
+      for _, c in ipairs(s.clauses) do branches[#branches + 1] = branchResult(c.body, pre, locals) end
+      if s.elseBody then
+        branches[#branches + 1] = branchResult(s.elseBody, pre, locals)
       else
-        if val and isTrackable(val) then
-          env[name] = val
+        branches[#branches + 1] = { env = copyEnv(pre), kill = {}, terminates = false }
+      end
+      mergeBranches(env, pre, branches)
+      out[#out + 1] = s
+    elseif s.kind == "Do" then
+      local pre = copyEnv(env)
+      mergeBranches(env, pre, { branchResult(s.body, pre, locals) })
+      out[#out + 1] = s
+    elseif s.kind == "While" or s.kind == "Repeat" or s.kind == "NumericFor" or s.kind == "GenericFor" then
+      invalidateCapturedAfterCall(s, env)
+      local loopVars = {}
+      if s.kind == "NumericFor" then
+        loopVars[1] = s.var
+      elseif s.kind == "GenericFor" then
+        loopVars = s.names
+      end
+      local cond = (s.kind == "While") and s.cond or nil
+      local tail = nil
+      if s.kind == "Repeat" then tail = { { kind = "ExprStat", expr = s.cond } } end
+      local inner = copyEnv(locals)
+      for _, name in ipairs(loopVars) do inner[name] = true end
+      optimizeBlock(s.body, loopEntryEnv(env, s.body, cond, loopVars), tail, inner)
+      if s.kind == "Repeat" then
+        -- The until-condition runs after the body, in the body's scope.
+        s.cond = substExpr(s.cond, loopEntryEnv(env, s.body, s.cond, {}))
+      end
+      invalidateFromNested(s, env)
+      out[#out + 1] = s
+    else
+      -- A function call anywhere in this statement could, through a
+      -- closure, mutate any variable captured anywhere in the program.
+      invalidateCapturedAfterCall(s, env)
+
+      local handled = false
+      if s.kind == "Local" and #s.names == 1 and #s.values <= 1 then
+        local name = s.names[1]
+        local val = s.values[1]
+        locals[name] = true
+        local later = sliceFrom(stmts, i + 1)
+        for _, t in ipairs(tail or {}) do later[#later + 1] = t end
+        -- A later reassignment counts as a mention: if the declaration were
+        -- removed, the assignment would silently write a global instead.
+        local isDead = not blockMentionsName({ body = later }, name)
+          and not restOfBlockCaptures(later, 1, name)
+
+        if isDead then
+          if val ~= nil and not isSideEffectFree(val) then
+            out[#out + 1] = { kind = "ExprStat", expr = val, line = s.line }
+          end
+          -- else: fully removable, no observable effect lost
+          handled = true
         else
-          env[name] = nil
+          if val and isTrackable(val) then
+            env[name] = val
+          else
+            env[name] = nil
+          end
+          out[#out + 1] = s
+          handled = true
+        end
+      end
+
+      if not handled then
+        -- A declaration that is not tracked shadows whatever was known
+        -- about the same name, so forget it.
+        if s.kind == "Local" then
+          for _, n in ipairs(s.names) do env[n] = nil; locals[n] = true end
+        elseif s.kind == "LocalFunction" then
+          env[s.name] = nil
+          locals[s.name] = true
+        elseif s.kind == "Assign" then
+          for _, tgt in ipairs(s.targets) do
+            if tgt.kind == "Name" then env[tgt.name] = nil end
+          end
+          -- A plain assignment of a literal to a local re-establishes its value.
+          local tgt = s.targets[1]
+          if #s.targets == 1 and tgt.kind == "Name" and locals[tgt.name]
+            and #s.values == 1 and isTrackable(s.values[1]) and not statementContainsCall(s) then
+            env[tgt.name] = s.values[1]
+          end
         end
         out[#out + 1] = s
-        handled = true
       end
-    end
-
-    if not handled then
-      if s.kind == "Local" then
-        -- multi-name local decl: conservatively invalidate anything
-        -- these names might have shadowed/aliased, but we never track
-        -- multi-name decls to begin with, so nothing to invalidate.
-      elseif s.kind == "Assign" then
-        for _, tgt in ipairs(s.targets) do
-          if tgt.kind == "Name" then env[tgt.name] = nil end
-        end
-      end
-      out[#out + 1] = s
     end
   end
 
   block.body = out
+  return env
 end
 
 -- Does the name get captured by a nested Function literal anywhere
