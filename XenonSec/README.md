@@ -1,570 +1,373 @@
 # XenonSec
-## Project layout
 
-```text
-XenonSec/
-├── xenonsec.lua              # CLI entrypoint
-├── obfuscate.lua             # Stable public API entrypoint
-├── src/                      # Core implementation
-│   ├── obfuscator.lua        # Pipeline: AST passes, then bundle + render
-│   ├── obfuscator/           # Output generation, one responsibility per file
-│   │   ├── loader.lua        # Memoized dofile() so each module loads once
-│   │   ├── util.lua          # Random identifiers, shuffles, XOR, %placeholder% substitution, minify
-│   │   ├── crypto.lua        # Constant cipher and its per-build parameters
-│   │   ├── opcodes.lua       # Opcode list, operator symbols, constant-field table
-│   │   ├── bundle.lua        # Constant pool, opcode renumbering, key vault, checksums
-│   │   ├── predicates.lua    # Opaque predicates (always-true / always-false identities)
-│   │   ├── handlers.lua      # Decoy handlers and real operator handlers
-│   │   ├── render.lua        # Renders the VM engine template
-│   │   ├── stdlib.lua        # Standard-library call renaming
-│   │   └── templates/        # Lua source templates (returned as strings)
-│   │       ├── vm.lua             # VM engine
-│   │       ├── header.lua         # Output header: key vault, constants, protos
-│   │       └── footer.lua         # Output footer: integrity check, engine call
-│   ├── lexer.lua             # Source lexer
-│   ├── parser.lua            # Lua/Luau parser
-│   ├── compiler.lua          # AST -> register bytecode (no value stack)
-│   ├── interpreter.lua       # Reference register VM used by tests
-│   ├── fold.lua              # Constant folding
-│   ├── ssa.lua               # SSA-style propagation
-│   ├── localize.lua          # Global localization
-│   ├── renamer.lua           # Scope-aware identifier renaming
-│   ├── capture.lua           # Closure/capture analysis
-│   └── junk.lua              # JUNK instruction injection
-├── tests/                    # Regression, differential, and protection tests
-│   ├── run_tests.lua
-│   ├── difftest.lua
-│   ├── e2e_test.lua
-│   ├── luau_test.lua
-│   ├── protection_test.lua
-│   └── ssa_test.lua
-├── assets/
-│   └── xenonsec-logo.svg
-└── README.md
-```
+![XenonSec](assets/xenonsec-logo.svg)
 
-Each module owns one stage or responsibility. The output-generation half of the
-pipeline lives in `src/obfuscator/`, so `src/obfuscator.lua` is now only the
-pipeline itself. The root entrypoints keep the command-line/API surface stable.
+XenonSec is a virtual-machine obfuscator for Lua 5.1 and Luau. It does not
+rename identifiers and scramble strings on top of your source. It compiles
+your script into a custom register bytecode and ships a randomized,
+hardened bytecode interpreter in the same file, wrapped in a single closure.
 
-A VM-based obfuscator for Lua 5.1 **and Luau**. It doesn't rename
-variables and scramble strings on top of your original source — it
-**compiles your script into a custom bytecode format and ships a
-randomized, hardened bytecode interpreter alongside it**, all wrapped
-in a single closure. The output file contains no recognizable trace of
-your original source: no identifiers, no plaintext strings, no
-original control-flow shape, no fixed opcode numbering, and nothing at
-all sitting at the file's top level except one expression.
-
-Pure Lua, self-contained, no external dependencies. The obfuscator
-tool itself and its generated output are both plain Lua-5.1-safe code
-(no `goto`, no native bitwise/`//` operators used at the language
-level) — verified against a real Lua 5.3 host throughout development,
-since a `lua5.1` binary wasn't installable in this sandbox, but nothing
-version-specific is ever emitted.
+The output contains no identifiers from your source, no plaintext strings, no
+fixed opcode numbering, and nothing at the top level of the file except one
+expression. It is pure Lua with no dependencies.
 
 ## Quick start
+
+Build with any Lua interpreter. The tests ran on Lua 5.3 (`texlua`), and no
+Lua 5.1 binary was available, so the output is written to avoid 5.2+ features
+but has not been run on 5.1 itself.
 
 ```
 lua xenonsec.lua myscript.lua                  # writes myscript.xenon.lua
 lua xenonsec.lua myscript.lua -o out.lua
-lua xenonsec.lua myscript.lua --luau           # parse input as Luau
-lua xenonsec.lua myscript.lua --junk 0.25 --decoys 30
+lua xenonsec.lua game.luau --luau              # parse input as Luau
 lua xenonsec.lua myscript.lua --antidebug      # opt-in debugger/env-logger detection
-lua xenonsec.lua myscript.lua --proxify        # opt-in ProxifyLocal: locals live in proxy objects (slower)
-lua xenonsec.lua myscript.lua --no-flush        # keep decoded constants cached for the whole run
-lua xenonsec.lua myscript.lua --no-minify      # keep scaffolding readable, for debugging
+lua xenonsec.lua myscript.lua --proxify        # opt-in: locals live in proxy objects (slower)
 ```
 
-Run `lua xenonsec.lua -h` for the full flag list. The output is a
-single, ordinary `.lua` file — run it exactly like you'd run the
-original:
+The output is a single ordinary `.lua` file. Run it exactly like the original:
 
 ```
 lua out.lua
 ```
 
-## Running on Luau runtimes (Lune, Lute)
+## Options
 
-Output files are verified to run on [Lune](https://lune-org.github.io/docs)
-(0.10.5) and on [Lute](https://github.com/luau-lang/lute) (1.0.1-nightly).
-The build tool itself needs a standard Lua interpreter (it uses `dofile` and
-`io`, which these runtimes don't provide), so build with `lua`, then run the
-output with the runtime:
+Run `lua xenonsec.lua -h` for the full help text.
+
+| Flag | Effect |
+|---|---|
+| `-o <file>` | Output path (default: `<input>.xenon.lua`). |
+| `--luau` | Parse the input as Luau (see [Luau support](#luau-support)). |
+| `--antidebug` | Enable debug-hook, timing, and env-logger detection. Off by default because of false-positive risk with profilers and IDEs. |
+| `--proxify` | Store registers and captured locals in proxy objects. Harder to read statically, slower (see [ProxifyLocal](#proxifylocal-opt-in---proxify)). |
+| `--junk <0..1>` | Junk-instruction rate. Default is auto-scaled to input size (about 0.20 to 0.55). `0` disables. |
+| `--decoys <n>` | Number of decoy constants. Default is auto-scaled. |
+| `--strength <1-4>` | Decoy and clutter level (default 2). Adds bulk, not secrecy. |
+| `--no-flush` | Keep decoded constants cached for the whole run. |
+| `--no-antitamper` | Disable the build-time checksum and runtime integrity check. |
+| `--no-fold` | Disable constant folding of literal arithmetic. |
+| `--no-ssa` | Disable value propagation and dead-store elimination. |
+| `--no-localize` | Disable global localization. |
+| `--no-minify` | Keep the generated VM and header readable (debugging). |
+
+Explicit `--junk` and `--decoys` values override auto-scaling.
+
+## Running on Luau runtimes
+
+The output runs on [Lune](https://lune-org.github.io/docs) 0.10.5 and on
+[Lute](https://github.com/luau-lang/lute) 1.0.1-nightly. The build tool itself
+needs a standard Lua interpreter, because it uses `dofile` and `io`, which
+these runtimes don't provide. Build with `lua`, then run the output with the
+runtime:
 
 ```
 lua xenonsec.lua game.luau -o game.xenon.luau --luau
 lute run game.xenon.luau        # or: lune run game.xenon.luau
 ```
 
-`tests/run_runtime.sh <runtime> [lua]` is a differential suite. Each program in
-`tests/runtime/` must produce identical output and exit code raw and
-obfuscated, across several option sets, and the env-logger check is run
-through the runtime too.
-
 Runtime notes:
-- Global names are encrypted constants in the output, like every other
-  string. Global reads and writes go through a small table-driven accessor
-  chosen at startup:
-  - If the real global environment is writable (Lua 5.1 via `getfenv(0)`,
-    Lua 5.3 via `_G`, Lune), globals go straight to it. Program semantics are
-    exactly the raw ones, including `_G.x` after `x = 1`.
-  - If it isn't (Lute: `_G` is read-only and does not track assignments),
-    writes go to a private table and reads fall back to the standard builtins
-    read live (so a host's replacement of `print` is seen) and then to the
-    `_G` snapshot of host globals.
+
+- Global names are encrypted constants in the output. Global reads and writes
+  go through an accessor chosen at startup:
+  - If the real global environment is writable (Lua 5.1 via `getfenv(0)`, Lua
+    5.3 via `_G`, Lune), globals go straight to it. Semantics match the raw
+    program, including `_G.x` after `x = 1`.
+  - If it isn't (Lute: `_G` is read-only and doesn't track assignments), writes
+    go to a private table. Reads check the standard builtins live, so a host
+    replacement of `print` is seen, and then fall back to a snapshot of host
+    globals.
 - Known limit on Lute only: a global the program writes is private to the
   program. Other modules or host code that read globals through the real
-  environment won't see it. Raw Lute already gives `_G` no view of
-  assignments, so single-file scripts behave identically.
-- The env-logger check reads the standard builtins directly by name. Those
-  names are plain text in the output (as the engine's own `type`/`pcall`
-  already are).
-- Lune has no `debug` library, so hook-based anti-debug checks are inert
-  there; the env-logger and timing checks still run.
+  environment won't see it. Raw Lute already gives `_G` no view of assignments,
+  so single-file scripts behave identically.
+- Lune has no `debug` library, so hook-based anti-debug checks are inert there.
+  The env-logger and timing checks still run.
 
-## Register VM, passes, and protection (current version)
+## What gets obfuscated
 
-**Machine.** Every function runs on a register file, with no value stack.
-Each instruction names the registers it reads and writes. Expressions compile
-straight into a destination register, and temporaries are released at the end
-of each statement. Results of a variable length (`f(...)`, `...`, multiple
-returns) go into consecutive registers, and a `top` count on the frame tells
-the consumer how many there are (`CALLM`, `RETM`, `SETLISTM`). `and`/`or` and
-conditionals test a register directly (`JF`, `JT`, `JNIL`).
-
-**Dispatch.** Method-based state machine: one handler per opcode, looked up by
-a per-build key. Operator instructions are one per operator (`BIN<k>`), with a
-constant right-hand form (`BINK<k>`) and one per unary operator (`UN<k>`).
-
-**Captured locals** (ones a nested closure refers to) keep the scope-cell
-mechanism, so closures still capture them by reference. Uncaptured locals live
-in registers. Blocks only create a scope when they declare a captured local.
-
-**Control-flow flattening** (`src/passes.lua`). Each function's code is cut into
-basic blocks, laid out in shuffled order (the entry block stays first), and
-joined by explicit jumps. Dead decoy blocks that nothing can reach are added.
-
-**Junk** (`src/junk.lua`) splices `JUNK` writes into a scratch register that no
-real instruction uses. Junk is never placed between a variable-length result
-and the instruction that consumes it, so it cannot overwrite those values.
-
-**Anti-tamper, two levels.** The global checksum is verified at startup. Each
-function also stores its own checksum, and the dispatcher re-verifies one
-function every 4096 steps, so an edit after startup stops the program mid-run.
-
-**Output size.** Builds target at least 100000 bytes (`minSize`; `false`
-disables it). When a build comes out short, it is rebuilt with a larger
-`strength`, which scales the decoy handlers and dead blocks. The padding is
-dead code: it makes a single paste too large for a one-shot read, and it adds
-no secrecy to the logic.
-
-**Limits.**
-- Handler bodies are ordinary Lua. The runtime has to contain what each opcode
-  does, so one build can always be studied. Per-build numbering, seeds, and
-  decoys make each build a separate analysis job, but do not remove the
-  semantics from the code.
-- The field-decoding arithmetic is visible in the dispatcher.
-- The cipher key sits next to the ciphertext, as before. Lazy decryption makes
-  constants harder to read, but does not keep them secret.
-- Speed: on a fib + loop benchmark the register VM runs about 3.6 times faster
-  than the previous stack VM (703 ms against 2545 ms) and about 2.3 times
-  faster than the original chain VM (1638 ms).
-
-## Luau support (`--luau`)
-
-A real, tested subset — not literally 100% of the language, and this
-section is explicit about the line:
-
-| Supported | Notes |
+| Layer | What happens |
 |---|---|
-| Compound assignment | `+= -= *= /= //= %= ^= ..=`. Index targets (`t[k] += v`, `t.k += v`) evaluate the object/key exactly once, via synthesized temp locals, so a side-effecting target expression is never re-run. |
-| `continue` | Inside `while`/`repeat`/numeric-`for`/generic-`for`. Correctly unwinds through arbitrarily nested `if`/`do` blocks, correctly lands before `until` in a `repeat` (which can still see the body's own locals), and correctly preserves fresh-per-iteration closure capture (tested explicitly). |
-| Floor division | `//` and `//=`. Implemented as `math.floor(a/b)`, not the native Lua-5.3 `//` token, since the *output* still has to run on Lua 5.1. |
-| Type annotations | `local x: T`, function param/return types, generic `<T>` function params, `type X = ...` aliases. Parsed with a heuristic balanced-bracket type-expression skipper and fully discarded — zero runtime effect, by design (this is an obfuscator, not a type checker). |
-| If-then-else expressions | `if C then A else B` / with `elseif`. Desugared into an immediately-invoked function wrapping a real `if` statement (not the classic `cond and a or b` trick, which silently breaks when `a` is falsy) — so it's semantically exact, not an approximation. |
-| String interpolation | `` `hello {name}, {1+1}` `` backtick strings, nesting included. The lexer brace-balances and extracts each `{...}` segment's raw source (skipping over nested string/backtick literals so a brace inside one never miscounts); the parser then tokenizes and parses each segment with itself, so any expression Luau allows works inside an interpolation. Desugars at parse time into a plain `"hello " .. tostring(name) .. ", " .. tostring(1+1)` concatenation chain — every later pass (fold/SSA/junk/renamer/compiler) sees ordinary String/Binop/Call nodes it already handles, nothing interpolation-specific anywhere downstream. |
-| Generalized iteration | `for k, v in t do` directly on a plain table — no `pairs`/`ipairs` required. Desugared at parse time: the original `in`-list is evaluated and adjusted to 3 values exactly as before, then a runtime `type(...) == "table"` check decides whether to treat the first value as an iterator function (old style — `pairs(t)`'s first value is already a function, so this is a no-op for existing code) or as a bare table to walk with the built-in `next` (new style). Tables with a custom `__iter` metamethod fall through to the `next`-based default rather than calling `__iter` — flag it if a real script needs that. |
-| Attributes | `@native`, `@checked`, etc. before a function declaration. Parsed and discarded, same reasoning as type annotations — these are hints for the real Luau compiler's native-codegen/typechecking, meaningless once the original code is thrown away and replaced with this tool's own VM. |
-| Extended numeric literals | Binary (`0b1010`), and `_` digit-group separators anywhere in a numeral (`1_000_000`, `0xFF_FF`, `0b1010_1010`). |
-| `\u{...}` string escape | Unicode codepoint escape in both plain and interpolated strings, e.g. `"\u{1F600}"`. Encoded to UTF-8 bytes by hand (no reliance on a host `utf8` library, since the tool itself may run on a plain Lua 5.1 host that doesn't have one). |
+| **Identifiers** | A static scope resolver renames every local, parameter, and loop variable to an opaque token. Genuine globals keep their names internally, and are encrypted at rest like every other string. |
+| **Control flow** | Compiled to register bytecode and run by a handler-table state machine. Control-flow flattening shuffles basic blocks and adds dead decoy blocks. No `if`/`while` or linear dispatch chain is left to read. |
+| **Opcodes and operands** | Each instruction carries its own random seed. Its opcode and operands are stored masked with a value derived from that seed and the field's slot. The VM decodes each instruction just before running it and never holds a decoded program. |
+| **Operators** | Binary and unary operators dispatch through per-build randomized integers. No operator symbol appears in the output, not even as a table key. |
+| **Strings and constants** | One shared constant pool, shuffled and encrypted with a four-layer cipher and a per-build key. Constants are decrypted lazily on first use and cached. Constants the program never reaches are never decrypted. |
+| **Numeric constants** | An additional reversible additive mask applied before the string cipher. |
+| **Decoys** | Unreferenced decoy constants, decoy opcode handlers, decoy dispatch branches, and dead blocks, all in the same format as real code. |
+| **Junk instructions** | `JUNK` writes into a scratch register that no real instruction uses. They are never placed inside a variable-length result window, and jump targets are remapped exactly. |
+| **Standard-library names** | `string.format`, `pcall`, and the other library functions the output uses are looked up through one table at startup, not named in the code (see [Standard-library lookups](#standard-library-lookups-and-the-constant-cache)). |
+| **Single closure** | The whole file is `return (function(...) ... end)(...)`. Nothing from the program sits at the chunk's top level. |
+| **Anti-tamper** | On by default. See [Anti-tamper](#anti-tamper-on-by-default). |
+| **Anti-debug** | Opt-in with `--antidebug`. See [Anti-debug](#anti-debug-opt-in---antidebug). |
+| **Minification** | The VM and header scaffolding is stripped of comments and collapsed before the encrypted payload is spliced in. |
 
-Known gaps, not yet implemented: `__iter`-metamethod iteration (see generalized iteration above), attributes on anonymous function expressions (only statement-level `function`/`local function` attributes are handled), and the `buffer` type (no special syntax of its own — `buffer.create(...)` etc. already work as ordinary library calls, this just means nothing's been specifically verified against it). None of these came up in testing so far — if one of them blocks a real script, say so and it'll get prioritized over guessing at coverage nobody's using.
+Everything above is on by default, except anti-debug and proxify. Each layer
+can be turned off individually through the flags above or the `opts` table on
+`Obf.obfuscate(src, name, opts)`.
 
-**All of this — string interpolation, generalized iteration, attributes,
-numeric literals, `\u{}` escapes, and the auto-scaled hardening below —
-was added in the same no-interpreter sandbox mentioned above, so none
-of it has actually been run.** Traced by hand against what each
-feature is supposed to desugar/produce, not executed. Run the test
-suite, or at minimum obfuscate a script exercising each of these, and
-run the *output* somewhere real (Lute included), before trusting any
-of it.
+## How the VM works
 
-## Anti-tamper (on by default) and anti-debug (opt-in, `--antidebug`)
+**Machine.** Every function runs on a register file with no value stack. Each
+instruction names the registers it reads and writes. Expressions compile into
+a destination register, and temporaries are released at the end of each
+statement. Variable-length results (`f(...)`, `...`, multiple returns) go into
+consecutive registers, and a `top` count on the frame tells the consumer how
+many there are (`CALLM`, `RETM`, `SETLISTM`). `and`, `or`, and conditionals
+test a register directly (`JF`, `JT`, `JNIL`).
 
-**Anti-tamper**: a checksum is computed at build time over every byte
-of the encrypted constant pool *and* every opcode/operand of every
-compiled instruction in every function, then re-verified at runtime
-before anything else happens. On mismatch, the reaction is deliberately
-not an obvious `error("tampered!")` — that just tells an attacker
-exactly what to patch out. Instead, every single instruction in every
-proto gets its opcode forced to a value that can never match anything
-real, so the very next instruction the VM tries to execute fails with
-a generic "bad opcode" — no matter *where* the tampering happened, and
-regardless of whether it landed in the encrypted string pool or
-directly in the bytecode table (both are covered; the two are
-protected via different mechanisms since only one of them is actually
-encrypted — see the source comments in `obfuscate.lua` for why). This
-was verified empirically, not just by inspection: an exhaustive
-byte-by-byte tamper sweep against a real generated file (every single
-byte position flipped, one at a time, against a program that exercises
-recursion, closures, method calls, and `pcall`) caught 100% of tamper
-attempts that landed in the actual data payload. Byte flips landing in
-inert regions (the banner comment, or VM engine code paths the
-specific program never executes) naturally have no visible effect —
-that's expected and correct, not a gap, and disappears entirely once
-the program actually exercises the affected code path.
+**Dispatch.** A method-based state machine with one handler per opcode, looked
+up by a per-build key. Operators are one instruction per operator (`BIN<k>`),
+with a constant right-hand form (`BINK<k>`) and one per unary operator
+(`UN<k>`).
 
-**Anti-debug** (`--antidebug`, off by default because these checks
-carry real false-positive risk against legitimate profilers/IDEs):
-- A `debug.gethook()` check — normal execution never installs a hook
-  on itself, so a non-nil hook is a strong signal something is
-  attached.
-- A tight-loop timing check — single-stepping or breakpoints make
-  trivial work take implausibly long.
-- **Anti-env-logger**: detects the common trick of replacing a global
-  like `print` or `pairs` with a table carrying a `__call`
-  metamethod so every call gets logged before being forwarded to the
-  real function. `type()` on such a proxy reports `"table"`, never
-  `"function"` — a free, zero-false-positive tell, verified against an
-  actual simulated logger-proxy attack (it was caught, and zero calls
-  ever reached the logger). The global names being checked are
-  themselves pulled from the same encrypted constant pool as
-  everything else in the file — the check itself never introduces a
-  plaintext string.
+**Captured locals** (locals a nested closure refers to) use a scope-cell
+mechanism, so closures still capture them by reference. Uncaptured locals live
+in registers. A block creates a scope only when it declares a captured local.
 
-All three routes feed the exact same "brick every opcode" reaction as
-the tamper checksum. Both `debug` and `os` may not exist in every host
-(common in sandboxed embeddings) — every check is guarded to silently
-skip rather than error when they're unavailable.
+**Handler gates.** Every handler starts with an opaque predicate over the
+frame's probe counter, built from number-theoretic identities that hold for
+every integer, so they only add analysis noise.
 
-## ProxifyLocal (opt-in, `--proxify`)
+**Speed.** On a fib + loop benchmark, the current register VM ran in about 703
+ms, compared with about 1638 ms for the earlier chain-based VM and about 2545
+ms for the earlier stack VM. These were measured on the versions at the time,
+not re-measured for this README.
 
-By default a register is a plain table slot, and a captured local is a
-plain field of its scope table. A reader (human or LLM) sees
-`regs[3] = regs[1] + regs[2]` and can follow the data flow directly.
+## Protection details
 
-With `--proxify`, both storage tables become **proxy objects**:
+### Control-flow flattening
 
-- **Registers** (`RMETA`): the table itself stays empty except for a
-  raw slot `[0]`, which holds the real storage. Register `i` lives at
-  `store[(i * PA + PB) % 2^20]`, where `PA` (odd) and `PB` are random
-  per build. Since `PA` is odd, the map is a bijection, so no two
-  registers collide. The register number never appears as a key.
-- **Captured locals** (`VMETA`): a captured local `name` lives at
-  `store[name]` in the scope's proxy, instead of as a plain field.
-- **Boxed values**: every stored value sits in a fresh box `{v}`, so a
-  register or local never holds a value directly. Reads and writes go
-  through `__index` / `__newindex`, so a reader can't find the value by
+Each function's code is cut into basic blocks, laid out in shuffled order with
+the entry block kept first, and joined by explicit jumps. Dead decoy blocks
+that nothing can reach are added. This runs after junk injection, and every
+jump target is remapped exactly.
+
+### Opcode and decoy hardening
+
+- **Decoy dispatch branches**: extra `elseif <op> == <number> and <predicate>`
+  branches are spliced into the dispatch chain. Their predicate ANDs an
+  always-false identity with an always-true one, so the body reads like a real
+  branch but can never run.
+- **Opaque predicates**: the identity pool has 15 number-theoretic facts (for
+  example, a square is never negative, and the product of three consecutive
+  integers is divisible by 6). Nesting depth per handler is auto-scaled.
+- **Dense handler table**: real opcodes and decoys are drawn from one shuffled
+  pool of `1..(real + decoys)`, so no key range separates decoys from real
+  handlers. Each decoy has the same wrapper as a real handler.
+- **Complex junk (`CPLX`)**: a junk form that runs a small loop of real
+  arithmetic. Its result is pushed and immediately popped, so its net stack
+  effect is always zero, and it can go anywhere ordinary junk can.
+
+### Auto-scaled hardening
+
+Junk rate, decoy constants, decoy dispatch branches, and predicate depth scale
+with the compiled program's own size, measured before junk is injected.
+
+- **Junk rate** falls from about 0.55 for small programs to a floor of 0.20 as
+  the program grows.
+- **Decoy constants** scale with the constant pool and instruction count, with
+  a floor and a cap.
+- **Decoy dispatch branches** scale with instruction count.
+- **Predicate depth** is highest for small programs (up to 8, plus 0 to 2
+  random), and settles at a floor of 3 for large ones. The cost is paid on
+  every dispatch at runtime, so it doesn't grow without bound.
+
+Explicit `--junk`, `--decoys`, and `--strength` values override the auto-scaling.
+
+### Size target
+
+Builds target at least 100000 bytes (`minSize`; `false` disables it). If a
+build comes out short, it is rebuilt with a higher `strength`, which scales the
+decoy handlers and dead blocks. The padding is dead code. It makes one-shot
+pastes awkward, and adds no secrecy to the logic.
+
+### Anti-tamper (on by default)
+
+Two levels of checking:
+
+- A **global checksum** covers the encrypted constant pool and every
+  opcode and operand of every compiled instruction in every function. It is
+  verified before anything else runs.
+- Each **function stores its own checksum**, and the dispatcher re-verifies
+  one function every 4096 steps. An edit made after startup stops the program
+  mid-run.
+
+On a mismatch, the reaction is deliberately not an obvious `error("tampered!")`,
+which would tell an attacker exactly what to patch out. Instead, every
+instruction's opcode is forced to a value that matches nothing real, so the next
+instruction fails with a generic "bad opcode", wherever the tampering happened.
+
+The protection was checked by flipping every byte of a generated file, one at a
+time, against a program using recursion, closures, method calls, and `pcall`.
+Every flip that landed in the data payload was caught. Flips in inert regions
+(the banner, or engine code the program never runs) have no effect, which is
+expected.
+
+### Anti-debug (opt-in, `--antidebug`)
+
+These checks carry real false-positive risk against legitimate profilers and
+IDEs, so they are off by default.
+
+- **Hook check**: `debug.gethook()` returns non-nil if something is attached.
+  Normal execution never installs a hook on itself.
+- **Timing check**: a tight loop of trivial work takes implausibly long under
+  single-stepping or breakpoints.
+- **Env-logger check**: detects replacing a global like `print` or `pairs` with
+  a table carrying a `__call` metamethod. `type()` on such a proxy returns
+  `"table"`, never `"function"`, which is a zero-false-positive signal. The
+  global names checked are pulled from the same encrypted pool as everything
+  else.
+
+All three feed the same "brick every opcode" reaction as the tamper checksum.
+Every check is guarded to skip silently when `debug` or `os` is missing, as is
+common in sandboxed hosts.
+
+### ProxifyLocal (opt-in, `--proxify`)
+
+By default a register is a plain table slot, and a captured local is a plain
+field of its scope table. A reader can follow `regs[3] = regs[1] + regs[2]`
+directly.
+
+With `--proxify`, both storage tables become proxy objects:
+
+- **Registers** live in a table that stays empty except for a raw slot `[0]`.
+  Register `i` is stored at `store[(i * PA + PB) % 2^20]`, where `PA` (odd) and
+  `PB` are random per build. Since `PA` is odd, the map is a bijection, so
+  registers never collide. The register number never appears as a key.
+- **Captured locals** live at `store[name]` in the scope's proxy, not as plain
+  fields.
+- **Boxed values**: each stored value sits in a fresh box `{v}`, reached only
+  through `__index` and `__newindex`, so a reader can't find the value by
   looking at the table.
 
-The proxy is built from the same per-build constants as the rest of
-the engine, so each build has its own layout. Nothing else in the
-generated file changes: the opcode scheme, anti-tamper checksums, and
-control-flow flattening all run exactly as before.
+The proxy is built from the same per-build constants as the rest of the engine.
+Nothing else changes: opcode scheme, checksums, and flattening run as before.
 
-**Cost.** Every register read and write is now a metamethod call plus
-a box allocation. Measured on a fib(24) + 100k-iteration loop
-benchmark (median of three runs, same build with and without the flag):
+**Cost.** Every register access becomes a metamethod call plus a box
+allocation. Measured on fib(24) plus a 100k-iteration loop (median of three
+runs):
 
 | Runtime | fib, plain | fib, `--proxify` | loop, plain | loop, `--proxify` |
 |---|---|---|---|---|
 | Lune 0.10.5 | ~450 ms | ~1000 ms (~2.3x) | ~175 ms | ~600 ms (~3.4x) |
 | Lute 1.0.1-nightly | ~550 ms | ~790 ms (~1.4x) | ~350 ms | ~580 ms (~1.6x) |
 
-The cost is larger on Lune than on Lute, and it grows with how much
-register traffic the program does. Use it for scripts where the
-slowdown is acceptable, not for hot loops.
+The slowdown grows with register traffic. Use it for scripts where that is
+acceptable, not for hot loops.
 
-**What it is, and isn't.** It raises the cost of statically reading
-the data flow. It is not secrecy: `PA`, `PB`, and the metatables are
-all in the output, so a reader who sees the file can reconstruct the
-mapping. Treat it as one more layer of analysis friction, like the
-other layers in this README.
+**What it is, and isn't.** It raises the cost of statically reading the data
+flow. It is not secrecy. `PA`, `PB`, and the metatables are all in the output,
+so a reader can reconstruct the mapping.
 
-Tested by `tests/proxify_test.lua` (every program run natively and
-obfuscated with proxify, alone, with `--antidebug`, and with the size
-target, plus tamper detection), and by `tests/run_runtime.sh` on Lune
-and Lute (both `--proxify` and `--proxify --antidebug`). The whole
-Lua 5.3 suite also passes with proxify forced on by default.
+### Standard-library lookups and the constant cache
 
-## Standard-library lookups and constant-cache flush (default on)
+**Library lookups.** The generated code doesn't name `string.format`,
+`setmetatable`, `pcall`, `math.random`, and the other library functions it uses.
+Each is rewritten to an index into one table, `SA[k]`, filled at startup from
+name strings stored as bytes offset by a per-build constant. The bootstrap names
+(`string.byte`, `string.char`, `table.concat`) stay literal, because the decoder
+needs them first. Metamethod keys such as `__index` stay literal, since Lua
+requires them.
 
-Two changes remove readable tells from the output without changing what
-the program does.
+The env-logger checks and live getters use bare global names on purpose. A bare
+read is the only form that sees a global replaced by name on every runtime, so
+those names remain readable, but their keys are encoded.
 
-**Standard-library lookups.** The generated code no longer names
-`string.format`, `setmetatable`, `pcall`, `math.random` and the other
-library functions it uses. Each one is rewritten to an index into one
-table, `SA[k]`, that is filled at startup from name strings stored as
-bytes offset by a per-build constant. The bootstrap names
-(`string.byte`, `string.char`, `table.concat`) stay literal, because the
-decoder needs them before anything else runs. Metamethod keys such as
-`__index` stay literal too, since Lua requires them.
+**Constant-cache flush.** Decoded constants are cached in a plain table. Every
+65536 steps, the periodic check empties that cache, so a dump of the table shows
+only recently used constants. A constant used again is decoded again. The cost
+on the fib + loop benchmark was within run-to-run noise at that interval. A
+16384-step interval cost roughly 5 to 10 percent, so it wasn't used. Turn the
+flush off with `--no-flush`.
 
-The env-logger checks (`--antidebug`) and the live getters still use the
-bare global names on purpose. A bare read is the only form that sees a
-global replaced by name on every runtime (on Lute, `_G` does not reflect
-globals assigned by name), so those names remain readable. Live-getter
-keys are encoded.
+Neither of these is secrecy. The decode key and ciphertext are in the output,
+so anyone with the file can decrypt the pool. The flush only shortens how long
+plaintext sits in memory.
 
-**Constant-cache flush.** Decoded constants are cached in a plain table.
-Every 65536 steps the periodic check now empties that cache, so a dump
-of the table sees only the constants used recently. A constant used
-again is decoded again. Measured cost on the fib + loop benchmark is
-within run-to-run noise at a 65536-step interval (a 16384-step interval
-cost roughly 5-10%, so it was not used). Turn it off with `--no-flush`.
+### Constant cipher
 
-**What this doesn't do.** The decode key and the ciphertext are in the
-output, so a reader who has the file can always decrypt the pool. The
-flush shortens how long plaintext sits in memory. It is not secrecy.
+The constant pool uses four layers, each a different kind of transformation,
+applied in sequence and reversed at runtime:
 
-Tested by `tests/mutate_test.lua` (16 tests: no readable library names
-in the output, correct output across several flush cycles with the flush
-on and off, and a constant that is decoded again after a flush), and by
-`tests/run_runtime.sh` on Lune and Lute, where it runs in all option sets.
+1. **RC4-style stream cipher.** A key-dependent permutation of a 256-entry state
+   table, with a generator that mutates the table on every byte. It is a
+   variant: the index update uses a per-build odd multiplier, not plain
+   addition. Every build draws its own seed basis, LCG multiplier, and addend.
+   No textbook constant (the FNV offset basis, `2654435`, `12345`) appears in
+   the output. On 40 random parameter sets, 2000 bytes of keystream were checked
+   against every period up to 64, and no repetition was found.
+2. **Integer-only keyed diffusion.** A per-byte XOR against a keyed LCG, plus an
+   8-bit rotation. Floating-point chaotic maps were avoided on purpose. Their
+   rounding differences can compound across interpreters (stock Lua, LuaJIT,
+   Luau), which would produce different bytes on different hosts. Every
+   intermediate value stays below 2^53, so the result is bit-identical on any
+   compliant platform.
+3. **CFB-style chaining.** Each byte's transform depends on the previous
+   ciphertext byte, so a ciphertext byte no longer maps to exactly one plaintext
+   byte through a fixed keystream value.
+4. **Keyed substitution-permutation layer.** Each byte goes through a
+   key-dependent S-box (a true permutation of all 256 values, not the identity),
+   and bytes are then shuffled within fixed 8-byte blocks by a second
+   key-derived permutation. A trailing partial block is left unpermuted. Its
+   length already equals the plaintext length, so this reveals nothing new.
 
-## Nothing readable except "Protected by XenonSec"
+All four layers use only integer and byte arithmetic, so they need no `bit` or
+`bit32` library.
 
-Every internal VM structure field that doesn't need to be human-readable
-isn't: the scope-chain's `vars`/`parent` fields, previously spelled out
-in plain English in the template, are now randomized identifiers like
-everything else, and the VM's fallback error message was a bare
-`error()` with no descriptive text at all (it used to say `"bad
-opcode"`, which is a small but real hint about what kind of thing
-just failed).
+The lazy-decrypt design makes constants harder to read but does not keep them
+secret. The key sits next to the ciphertext.
 
-What's left after that sweep is exactly what Lua *requires* to exist
-as literal source text no matter what — its own keywords (`function`,
-`while`, `then`, ...) and standard library names (`string.byte`,
-`table.concat`, `math.floor`, ...) — plus exactly one deliberate,
-readable phrase: **"Protected by XenonSec"**. That phrase isn't just an
-inert comment anyone could delete with zero consequence, either: a
-second, *encrypted* copy of the same text lives in the constant pool
-alongside the program's real strings, gets decoded through the same
-key as everything else, and is checked with `gsub` at runtime —
-if it doesn't decode back to that exact text, that's treated exactly
-like any other tamper signal. (Genuinely reading a script's own
-comment text back at runtime isn't reliably possible in standard Lua
-— `debug.getinfo(1,"S").source` only returns the actual file
-*contents* when loaded via `load(str)` with no chunkname; running via
-`lua file.lua`, `dofile`, or `load(str, name)` — the realistic cases —
-gives back just the filename, verified empirically rather than
-assumed. This encrypted-second-copy approach sidesteps that limitation
-entirely rather than shipping something that would silently not work.)
+### Nothing readable except "Protected by XenonSec"
 
-## Four-layer string/constant cipher
+The VM's internal field names are randomized identifiers, and its fallback error
+is a bare `error()` with no descriptive text. What remains is what Lua requires
+as literal text: its keywords and standard-library names, plus one deliberate
+phrase, **"Protected by XenonSec"**.
 
-The previous encryption was a plain repeating-key XOR — a Vigenere
-cipher, textbook-breakable by frequency analysis once there's enough
-ciphertext, since the keystream repeats with a short, fixed period.
-Replaced with four layers, each doing a genuinely different kind of
-transformation, applied in sequence and unwound in reverse at runtime:
+That phrase is not an inert comment that could be deleted for free. An
+encrypted second copy lives in the constant pool, is decoded with the same key
+as the program's strings, and is checked with `gsub` at runtime. If it doesn't
+decode to the exact text, it's treated as a tamper signal. Reading a script's
+own comment text at runtime isn't reliable in standard Lua, so this avoids
+depending on it.
 
-1. **RC4-style stream cipher** — a key-dependent permutation of a
-   256-entry state table, with a pseudo-random generator that mutates
-   that table on every byte. It is a variant, not textbook RC4: the
-   index update uses a per-build odd multiplier instead of plain
-   addition. Checked empirically on 40 random parameter sets: 2000
-   bytes of keystream each, against every period up to 64, with no
-   repetition found.
-   
-   Every build also draws its own seed basis, LCG multiplier and
-   addend, and this multiplier. No textbook constant (the FNV offset
-   basis, `2654435`, `12345`) appears in the output.
-2. **Integer-only keyed diffusion** — a per-byte XOR against a keyed
-   linear-congruential generator, plus an 8-bit rotation. Deliberately
-   *not* a floating-point chaotic map (`chaos = r*x*(1-x)`-style
-   constructions): those are a documented source of cross-platform
-   divergence in the chaos-based-cryptography literature, since tiny
-   floating-point rounding differences between a stock-Lua interpreter,
-   LuaJIT's JIT-compiled arithmetic, and Luau can compound over enough
-   iterations and silently produce different bytes on different hosts
-   — a real risk specifically because this output has to decrypt
-   correctly on whatever Lua the end user has, not just the machine
-   that built it. Every intermediate value in this layer is kept well
-   under 2^53 (the exact-integer range of an IEEE-754 double), so it's
-   bit-for-bit identical on any compliant platform.
-3. **CFB-style chaining** — each byte's transform depends on the
-   previous ciphertext byte, so a ciphertext byte no longer maps to
-   exactly one plaintext byte through a fixed keystream value the way
-   plain RC4's does.
-4. **Keyed substitution-permutation layer** — XenonSec's own
-   construction, not a variant of the three above. Every byte first
-   goes through a key-dependent S-box (a genuine permutation of all
-   256 byte values, built with the same keyed LCG the diffusion layer
-   uses — not the identity table), then bytes are shuffled *within*
-   fixed 8-byte blocks according to a second, independent key-derived
-   permutation. Both permutations come from the key alone, so nothing
-   extra has to be shipped beyond the same key the other three layers
-   already carry. A trailing partial block is left unpermuted — safe,
-   since ciphertext length already equals plaintext length and reveals
-   nothing new.
+## Optimization passes
 
-All four layers are pure integer/byte arithmetic — no `bit`/`bit32`
-dependency, nothing that isn't valid in vanilla Lua 5.1. The first
-three layers were verified with 50+ round-trip tests (empty strings,
-single bytes, all 256 byte values, long strings, varying key lengths)
-before being wired into the real pipeline, then the full test suite
-run across 65+ independent randomized builds with zero failures.
-**Layer 4 was added in an environment with no Lua interpreter
-available, so it has not been run yet** — build/encrypt and decode
-were traced by hand step-for-step against each other, but you should
-run `run_tests.lua`, `e2e_test.lua`, and `protection_test.lua` (or at
-minimum obfuscate-then-run a sample script) before trusting it on
-anything real.
+| Pass | File | What it does |
+|---|---|---|
+| Capture analysis | `capture.lua` | Finds which locals a closure captures. Runs before SSA and again after renaming, for register decisions. |
+| Constant folding | `fold.lua` | Folds literal arithmetic at build time. Runs before and after SSA. |
+| SSA-style propagation | `ssa.lua` | Value numbering: copy and constant propagation, plus dead-store elimination. |
+| Global localization | `localize.lua` | Caches read-only globals in locals. Anything reassigned while global is left alone. |
+| Renamer | `renamer.lua` | Static scope resolution and identifier renaming. |
+| Junk injection | `junk.lua` | Injects `JUNK` writes outside variable-length windows, with exact jump remapping. |
+| Flattening | `passes.lua` | Control-flow flattening, described above. |
 
-## Heavy hardening: decoys, deeper predicates, and a real complex opcode
+### SSA, and what "cross-branch" means
 
-Three further hardening layers, all with the same non-negotiable
-property as everything above: zero ability to change program
-behavior, verified by running the existing suites (register-VM
-closures, SSA propagation, Luau syntax, the full sample scripts) across
-dozens of independent randomized builds after each change, not just
-once.
+The SSA pass merges values across branches, the way a phi-function would for a
+simple case:
 
-- **Decoy dispatch branches**: extra `elseif <op> == <number> and
-  <predicate> then <body>` branches spliced into the opcode dispatch
-  chain, gated by a predicate built from a genuinely always-false
-  identity ANDed with an always-true one — so it reads exactly like
-  every other (real) branch's guard, but can never be taken. The
-  bodies are syntactically real, plausible-looking stack manipulation
-  code. A build now ships with a random handful of these in addition
-  to its real ~32 opcodes, and there's no way to tell which is which
-  by structure alone.
-- **Deeper, more varied opaque predicates**: the identity pool grew
-  from 7 to 15 (still all genuine number-theoretic facts — "a square
-  is never negative", "the product of 3 consecutive integers is
-  divisible by 6", etc. — nothing probabilistic). Nesting depth per
-  opcode check, decoy dispatch branches, and decoy constants all
-  auto-scale to the size of the real program instead of using one flat
-  count for every input (see next section) — a one-liner and a
-  thousand-line script no longer get the same handful of decoys.
+- After `if c then x = 1 else x = 1 end`, a later `print(x)` sees the literal
+  `1`. When branches disagree, the merge drops the value.
+- A branch that always returns, breaks, or continues doesn't contribute to the
+  merge. An `if` with no `else` counts as an else that changes nothing.
+- A condition that is a literal after propagation (for example `if DEBUG then`
+  with `DEBUG = false`) is collapsed to the branch that runs.
+- Values flow into `if`, `do`, and loop bodies.
+- Dead stores are removed only when the name is never read or reassigned later.
+  Without the reassignment check, `local x = 1; x = 2` would lose its
+  declaration and write a global.
 
-## Auto-scaled hardening
+Loops are conservative. Values the loop body can change are forgotten at loop
+entry, and no value is carried around a back edge. Full loop-header
+phi-functions with fixed-point iteration are not built, so this is not a
+complete CFG-based SSA.
 
-Junk rate, decoy constants, and decoy dispatch branches are no longer
-flat numbers tuned for an "average" script — they scale off the real
-compiled program's own size (instruction count, constant pool size),
-computed *before* junk is injected so the decision isn't fed by its
-own output:
-
-- **Junk rate**: small scripts (few real instructions) get a much
-  higher percentage — a flat rate barely adds bulk to a 10-instruction
-  script — sliding from roughly 0.55 down to a floor of 0.20 as the
-  program's own size grows and starts pulling its own weight.
-- **Decoy constants**: scales with both the real constant pool and
-  instruction count, with a floor (so a near-empty script still ships
-  meaningful decoy noise) and a cap (so a huge input doesn't blow the
-  decoy pool up past the point of diminishing returns).
-- **Decoy dispatch branches**: scales with instruction count, so a
-  large real dispatch chain gets a proportionally larger decoy chain
-  around it, not the same flat handful a one-liner gets.
-- **Opaque-predicate depth**: inverted compared to the others — depth
-  per opcode check is highest (up to 8, plus 0-2 random) for small
-  programs, since a tiny script can afford more relative weight per
-  dispatch, and settles down to a floor of 3 as instruction count grows,
-  since this cost is paid on *every* dispatch at runtime and shouldn't
-  scale up unbounded just because the source file is large. Capped well
-  below the 15-identity pool so a build never needs more unique
-  identities than exist.
-
-`--junk <rate>` and `--decoys <n>` still work exactly as before and
-override auto-scaling entirely when passed — auto-scaling only kicks
-in when the caller doesn't specify a value.
-- **A real complex opcode (`CPLX`)**: junk instructions were
-  previously always a trivial push-then-immediately-pop of a constant
-  value. `CPLX` is a genuinely richer instruction — it runs a small
-  loop doing real arithmetic — while remaining exactly as safe as the
-  simple junk pattern, because the loop's result still only ever gets
-  pushed and immediately popped: net stack effect is always zero
-  regardless of what the loop computes, so it can be spliced in
-  anywhere real junk could be, with nothing to reason about beyond
-  "does this net to zero" (it provably always does).
-
-## No plaintext operator tables, either
-
-Earlier builds had one remaining leak: the VM's internal binary/unary
-operator dispatch used a small literal lookup table keyed by the
-operator's own source text — `["+"]=1, ["-"]=2, ["=="]=3, ...` — sitting
-in plain sight in the shipped file. The *program's own* use of "+"
-was already encrypted, but the VM engine's own operator model wasn't.
-Fixed: the compiler now emits a per-build randomized integer directly
-for every `BINOP`/`UNOP` instruction (mirroring how opcode numbers
-themselves are randomized), so the dispatch table is indexed straight
-by that integer — no string, no lookup table, nothing resembling
-`"+"`/`"-"`/`"=="` appears anywhere in the output at all. Verified by
-scanning generated output for the distinctive `["<op>"]=` key pattern
-across a source file exercising every arithmetic, comparison, and
-unary operator: zero matches.
-
-## What actually gets obfuscated
-
-| Layer | What happens |
-|---|---|
-| **Identifiers** | A real static-scope resolver renames every local, param, and loop variable to an opaque token; only genuine globals keep their spelling internally, and even those are encrypted at rest same as everything else. |
-| **Control flow** | Compiled into flat bytecode and executed by a handler-table state machine: one handler per opcode, looked up by a per-build key. There is no `if`/`while` or linear dispatch chain left to read in the output. |
-| **Opcodes and operands** | Every instruction carries its own random seed. Its opcode and three operands are each stored masked with a value derived from that seed and the field's slot, so no single position-based pattern recovers them. The VM decodes each instruction immediately before running it (step by step), and never holds a fully decoded program. Decoy handler entries pad the handler table. |
-| **Opaque-predicate handler gates** | Every handler starts with an opaque predicate over the frame's probe counter, built from real number-theoretic identities. The identities hold for every integer, so they only add analysis noise. |
-| **Strings & literals** | One shared constant pool, shuffled and XOR-encrypted with a random per-build multi-byte key. Constants are decrypted lazily, on first use, and cached; constants the program never reaches are never decrypted. |
-| **Numeric constants** | An additional reversible additive mask applied before the string/XOR layer. |
-| **Decoy constants** | Random unreferenced junk entries shuffled into the pool. |
-| **Junk instructions** | `JUNK` writes into a scratch register no real instruction uses, spliced at random points, never inside a variable-length result window, with exact jump-target remapping. |
-| **Global localization** | Read-only globals get cached into a local once at the top; anything ever reassigned while global is excluded, so real global mutation always still works. |
-| **Constant folding + SSA-style optimization** | Literal arithmetic folded at build time; a real value-numbering pass does copy/constant propagation and dead-store elimination, including across `if`/`else` merges (a value survives a merge only when every falling-through branch agrees on it) and into `if`/loop bodies. Constant `if` conditions are collapsed. See the notes below for exactly what "real" means here and the bugs that were found and fixed in it. |
-| **Register VM** | Uncaptured locals and all temporaries live in registers; there is no value stack. Captured locals keep the proven cell/scope-chain mechanism. |
-| **Heavy minification** | The VM/header scaffolding is stripped of comments and collapsed to a handful of space-joined lines before the (already-encrypted) payload is spliced in. |
-| **Single-closure output** | The entire file is `return (function(...) ... end)(...)` — nothing (opcode numbers, decode key, consts, protos, helper names) sits at the chunk's top level at all. |
-| **Anti-tamper** | Build-time checksum over the full data payload, re-verified at runtime; any mismatch bricks every opcode in every proto rather than raising an obvious error. On by default, `--no-antitamper` to disable. |
-| **Anti-debug / anti-env-logger** | `debug.gethook`, timing, and `__call`-proxy-logger detection, feeding the same tamper reaction. Opt-in via `--antidebug` (real false-positive risk against legitimate profilers/IDEs). |
-| **No plaintext operator tables** | Binary/unary operators dispatch through a per-build randomized integer, not a `["+"]=1`-style string-keyed table — nothing resembling an operator symbol appears anywhere in the output. |
-
-All of the above are on by default (except anti-debug) and individually
-toggleable — see `xenonsec.lua -h`, or the `opts` table on
-`Obf.obfuscate(src, name, opts)`.
-
-## Architecture
-
-```
-input.lua
-   |  lexer.lua / parser.lua     tokenizer + recursive-descent -> AST (luau flag gates Luau syntax)
-   v
-  AST
-   |  capture.lua (early pass)   which locals are ever closed over -- SSA needs this too, see below
-   |  fold.lua                   constant-fold literal arithmetic
-   |  ssa.lua                    value numbering: copy/constant propagation + dead-store elimination
-   |  fold.lua (again)
-   |  localize.lua               prepend synthetic local-x-equals-x for read-only globals
-   |  renamer.lua                static scope resolution + identifier renaming
-   |  capture.lua (again)        re-run post-rename for compiler.lua's register decisions
-   v
-  AST (optimized, localized, renamed)
-   |  compiler.lua                AST -> per-function register bytecode + constant pool
-   v
-  module { consts, protos }
-   |  junk.lua                   inject JUNK writes (never in a variadic result window), remap jumps
-   |  obfuscate.lua               opcode shuffle + opaque predicates, constant shuffle + decoys +
-   |                              encryption, template rendering, heavy minify, single-IIFE wrap
-   v
-  single self-contained .lua file
-```
-
-### A real bug this project found in itself (kept here on purpose)
-
-The SSA pass originally didn't account for this: a function call,
-anywhere, can mutate a variable through a closure that captured it --
-even with no visible call between that variable's last known value and
-the point being optimized. Concretely:
+Closures and statements containing a call are opacity walls for captured names.
+Here is why. A function call can mutate a variable through a closure that
+captured it, even with no visible assignment in between:
 
 ```lua
 local calls = 0
@@ -573,148 +376,172 @@ local function getTable()
   return { x = 10 }
 end
 local t = getTable()
-print(t.x, calls)   -- SSA had wrongly propagated calls=0 here
+print(t.x, calls)   -- an unguarded SSA would propagate calls=0 here
 ```
 
-The differential test suite (which executes both the original and
-optimized code and diffs real output) caught this immediately as a
-wrong-answer, not a crash. The fix: `capture.lua` now also runs once,
-early, on the untransformed AST, purely so SSA can know which names
-are ever reachable through some closure in the whole program: any
-statement containing a function call invalidates every tracked value
-for such a name, since that call could -- through some closure, however
-indirectly -- have just mutated it. Names never captured by anything
-stay safely trackable across calls, since nothing else could hold a
-reference able to mutate them. Four dedicated regression tests cover
-this specific class of bug now, alongside the closures/loop-variable
-class of bug documented below.
+The differential suite caught this as a wrong answer, not a crash. The fix:
+`capture.lua` runs once on the untransformed AST so SSA knows which names any
+closure can reach. A statement containing a call invalidates those names.
+Names never captured stay trackable across calls.
 
-### What "cross-branch" means here, and what it still doesn't do
+## Luau support
 
-The SSA pass now merges values across branches, the way a phi-function
-would for a simple case. After `if c then x = 1 else x = 1 end`, a later
-`print(x)` sees the literal `1`. Where the branches disagree, the merge
-drops the value and nothing is propagated. A branch that always returns,
-breaks, or continues doesn't contribute to the merge. An `if` with no
-`else` counts as an else that changes nothing. A condition that is a
-literal after propagation (for example `if DEBUG then` with `DEBUG = false`)
-is collapsed to the branch that runs.
+`--luau` covers a tested subset of Luau. It is not complete. Syntax that is
+parsed and then discarded has no runtime effect, by design, because this tool
+replaces the original code with its own VM.
 
-Loops are conservative. Values the loop body can change are forgotten at
-loop entry, and a value is never carried around a back edge. Full
-phi-functions at loop headers with fixed-point iteration are not built,
-so this is not a complete CFG-based SSA. Closures and any statement
-containing a call remain opacity walls for captured names, for the same
-reason as the bug described above. The implementation is sound on the
-cases it handles and is tested against real output in
-`tests/ssa_test.lua`.
+| Feature | Notes |
+|---|---|
+| Compound assignment | `+= -= *= /= //= %= ^= ..=`. Index targets evaluate the object and key exactly once, using synthesized temporaries. |
+| `continue` | In `while`, `repeat`, and both `for` forms. Unwinds through nested `if` and `do` blocks, lands before `until` in a `repeat` (where the body's locals are still visible), and gives fresh closure capture per iteration. |
+| Floor division | `//` and `//=`, compiled to `math.floor(a/b)` so the output still runs on Lua 5.1. |
+| Type annotations | Local, parameter, and return types, generic `<T>` parameters, and `type X = ...` aliases. Skipped by a balanced-bracket heuristic and discarded. |
+| If-expressions | `if C then A else B` and `elseif`. Compiled to an immediately-invoked function around a real `if`, not the `cond and a or b` trick, which breaks when `a` is falsy. |
+| String interpolation | `` `hello {name}, {1+1}` ``, with nesting. Desugared at parse time into a concatenation chain, so later passes see ordinary nodes. |
+| Generalized iteration | `for k, v in t do` on a plain table, without `pairs`. At runtime, a table first value is walked with `next`, and a function first value is called as an iterator, so existing `pairs` loops are unchanged. |
+| Attributes | `@native`, `@checked`, and similar before a function declaration. Parsed and discarded. |
+| Numeric literals | Binary (`0b1010`) and `_` digit separators (`1_000_000`, `0xFF_FF`). |
+| `\u{...}` escapes | In plain and interpolated strings. Encoded to UTF-8 by hand, so no `utf8` library is needed. |
 
-### Why not a fully general, liveness-allocated register VM?
+**Known gaps:** `__iter`-metamethod iteration (tables with `__iter` use the
+`next`-based default), attributes on anonymous function expressions (only
+statement-level `function` and `local function` are handled), and the `buffer`
+type, which has no special syntax, so `buffer.create` and similar calls work as
+ordinary library calls but are not specifically tested. If one of these blocks a
+real script, that is a reason to prioritize it.
 
-The "register-based VM" here is a genuine architectural change (locals
-split into flat register slots vs. proven cell-based storage depending
-on closure capture -- the same fast-locals/cell-variables split real
-language VMs use), not a full liveness-allocated register file with
-slot reuse/spilling across a function's whole lifetime. That would
-mean re-deriving closure/upvalue semantics from scratch against a much
-larger surface area -- a bigger, separate undertaking.
+## Architecture
 
-### A real bug from earlier in the project (numeric-for closures)
+```
+input.lua
+   |  lexer.lua / parser.lua     tokens -> AST (luau flag gates Luau syntax)
+   v
+  AST
+   |  capture.lua (early)        closure-captured names, used by SSA
+   |  fold.lua                   constant folding
+   |  ssa.lua                    value numbering, propagation, dead stores
+   |  fold.lua (again)
+   |  localize.lua               cache read-only globals in locals
+   |  renamer.lua                scope resolution and identifier renaming
+   |  capture.lua (again)        register decisions for the compiler
+   v
+  AST (optimized, localized, renamed)
+   |  compiler.lua               AST -> register bytecode + constant pool
+   v
+  module { consts, protos }
+   |  junk.lua                   JUNK injection, jump remapping
+   |  passes.lua                 control-flow flattening
+   |  src/obfuscator/*          opcode shuffle, predicates, decoys, constant
+   |                             cipher, anti-tamper, template render, minify
+   v
+  single self-contained .lua file
+```
 
-Before the register VM existed, an early version of the compiler's
-numeric-`for` loop gave every iteration's loop variable the same
-underlying storage, so `for i=1,3 do fns[i]=function() return i end end`
-made all three closures return `3`, not `1,2,3`. Fixed by giving each
-iteration a genuinely fresh binding. Both the register-VM path and the
-scope-chain path are tested for this specifically, including with
-`continue` interacting with per-iteration capture.
+### Project layout
 
-## Test coverage
+```text
+XenonSec/
+├── xenonsec.lua              # CLI entrypoint
+├── obfuscate.lua             # Stable public API entrypoint
+├── src/
+│   ├── obfuscator.lua        # Pipeline: AST passes, then bundle and render
+│   ├── obfuscator/           # Output generation, one responsibility per file
+│   │   ├── loader.lua        # Memoized dofile() so each module loads once
+│   │   ├── util.lua          # Random identifiers, shuffles, XOR, minify
+│   │   ├── crypto.lua        # Constant cipher and its per-build parameters
+│   │   ├── opcodes.lua       # Opcode list, operator symbols, constant fields
+│   │   ├── bundle.lua        # Constant pool, opcode renumbering, key vault, checksums
+│   │   ├── predicates.lua    # Opaque predicates
+│   │   ├── handlers.lua      # Decoy and real operator handlers
+│   │   ├── render.lua        # Renders the VM engine template
+│   │   ├── stdlib.lua        # Standard-library call renaming
+│   │   └── templates/        # Lua source templates, returned as strings
+│   │       ├── vm.lua        # VM engine
+│   │       ├── header.lua    # Key vault, constants, protos
+│   │       └── footer.lua    # Integrity check, engine call
+│   ├── lexer.lua             # Lexer
+│   ├── parser.lua            # Lua and Luau parser
+│   ├── compiler.lua          # AST -> register bytecode
+│   ├── interpreter.lua       # Reference register VM used by tests
+│   ├── passes.lua            # Control-flow flattening
+│   ├── fold.lua              # Constant folding
+│   ├── ssa.lua               # SSA-style propagation
+│   ├── localize.lua          # Global localization
+│   ├── renamer.lua           # Scope-aware renaming
+│   ├── capture.lua           # Closure capture analysis
+│   └── junk.lua              # JUNK injection
+├── tests/                    # See Testing below
+├── assets/
+│   └── xenonsec-logo.svg
+└── README.md
+```
 
-- `run_tests.lua` -- 38 differential tests (reference interpreter vs. native Lua).
-- `e2e_test.lua` -- 20 tests against the actual generated output file with every pass active together.
-- `ssa_test.lua` -- 43 tests against the SSA pass specifically, including the regression classes above and cross-branch merge cases.
-- `luau_test.lua` -- 9 tests against the full obfuscated pipeline for every Luau feature, diffed against hand-written plain-Lua-5.1 oracles.
-- `passes_test.lua` -- 12 pass-level tests, including a regression test for junk landing inside a multi-result call window (`f(g(h()))`).
-- `mutate_test.lua` -- 16 tests: standard-library lookups, the constant-cache flush, per-build cipher constants, and handler-key spread.
-- `proxify_test.lua` -- 31 tests: 9 programs, each run natively and obfuscated with `--proxify` (alone, with `--antidebug`, and with the size target), plus proxy-emission and tamper checks.
-- `run_runtime.sh <runtime> texlua` -- Lune/Lute differential suite: 10 programs x 7 option sets (including `--proxify`), plus an env-logger check.
-- `protection_test.lua` -- 10 tests against anti-tamper (including an actual bytecode-tampering attempt), anti-debug (including a real `debug.sethook` and a simulated `__call`-proxy env-logger), and the no-plaintext-operator-table guarantee.
-- All suites are also run repeatedly (20-40 randomized builds) under a hard timeout, to catch both randomization-dependent edge cases and any reintroduction of the infinite-loop/wrong-answer bug classes documented above.
+## Testing
 
-## Known limitations
+| Suite | Command | Result |
+|---|---|---|
+| Differential tests (reference VM vs. native Lua) | `run_tests.lua` | 38 / 38 |
+| End-to-end, every pass on | `e2e_test.lua` | 20 / 20 |
+| SSA pass, including regression and cross-branch cases | `ssa_test.lua` | 43 / 43 |
+| Luau features, against plain-Lua oracles | `luau_test.lua` | 12 / 12 |
+| Pass-level, including junk inside `f(g(h()))` windows | `passes_test.lua` | 12 / 12 |
+| Standard-library lookups, cache flush, cipher constants | `mutate_test.lua` | 16 / 16 |
+| ProxifyLocal, with and without other options, plus tamper checks | `proxify_test.lua` | 31 / 31 |
+| Anti-tamper, anti-debug, no plaintext operator tables | `protection_test.lua` | 19 / 19 |
+| Lune and Lute differential suite (10 programs x 7 option sets, plus an env-logger check) | `sh tests/run_runtime.sh <runtime> texlua` | 72 / 72 on Lune |
 
-Items below are marked as fixed or inherent. "Inherent" means the
-output has to run from the file, so the reader can always see it.
+`difftest.lua` is a helper module loaded by `run_tests.lua`, not a standalone
+suite.
 
-**Fixed in this version:**
-- Fixed cipher constants: each build has its own seed basis, LCG
-  multiplier/addend, and RC4-variant multiplier (see the cipher
-  section).
-- Decoy handlers were separable: real opcodes were a dense block of
-  small numbers and decoys a sparse block of 4-digit numbers. Now every
-  real key and every decoy key is drawn from one shuffled pool of
-  `1..(real + decoys)`, so the handler table is dense and nothing
-  separates decoys by key. Each decoy is also written in the same
-  wrapper as a real handler (gate, body, `ip + 1`). The dense table is
-  also faster than the sparse one it replaces. The test in
-  `mutate_test.lua` fails on the old layout.
-- The runtime repeated the seed derivation in four places. It is now
-  one helper.
+The suites have also been run repeatedly across randomized builds to catch
+randomization-dependent failures. Test counts are from the most recent run and
+will change as tests are added.
 
-**Inherent (these would need the program to not run from the file):**
-- The decode key and the ciphertext are both in the output, so a reader
-  who has the file can decrypt the pool. The constant cache flush
-  shortens how long plaintext stays in memory, but this is not secrecy.
-- Handler bodies are ordinary Lua. A reader who knows the VM design can
-  find the dispatch, the register table, and the instruction pointer,
-  whatever their names.
-- The env-logger checks and the live getters use bare global names. A
-  bare read is the only form that sees a global replaced by name on
-  every runtime (on Lute, `_G` does not reflect globals assigned by
-  name), so those names stay readable. The same goes for metamethod
-  keys such as `__index`, which Lua requires as literals.
-- The field-decoding arithmetic is visible in the dispatcher. Hiding it
-  further would need a different encoding scheme, not more of the same.
-- The cipher is a custom construction, not a standard or reviewed one.
-  Per-build constants remove fixed values, but no cryptographic
-  strength is claimed.
+The host-side suites above were run with `texlua` (Lua 5.3), since no Lua 5.1
+binary was available. The runtime suite runs the same kind of programs under
+Lune.
 
-**Feature limits (not protection):**
-- Luau `__iter`-metamethod iteration and `function`-expression-level
-  attributes aren't handled yet (see Luau support above).
-- This is identifier/control-flow/constant obfuscation with junk
-  injection and opaque-predicate hardening, not a full anti-tamper/
-  anti-debugger/VM-detection-resistance suite. No checksumming, no
-  debugger-detection, no self-modifying code. Raises the cost of
-  casual copy-paste theft; not a cryptographic guarantee.
-- The SSA pass merges values across `if`/`else` but not across loop back edges (no loop-header phi-functions); see the SSA notes.
-- `--proxify` makes register-heavy code 1.4x to 3.4x slower (see the ProxifyLocal section). It is opt-in for that reason.
-- Interpreter, not compiled code -- noticeably slower than plain Lua. The
-  handler-table VM costs roughly 25% more runtime than the previous
-  if/elseif-chain VM (measured on a fib + loop benchmark), in exchange for
-  removing the readable dispatch chain and encoding opcodes on disk.
-- Handler bodies are ordinary Lua: the runtime has to contain what each opcode
-  does, so one build can always be studied. Per-build numbering, seeds, and
-  decoys make each build a separate analysis job, but they don't remove the
-  semantics from the code.
+## Limitations
+
+**Not protection, by design:**
+
+- The decode key and the ciphertext are both in the output, so anyone with the
+  file can decrypt the constant pool. The cache flush shortens how long plaintext
+  stays in memory. It is not secrecy.
+- Handler bodies are ordinary Lua. A reader who knows the VM design can find the
+  dispatch, the register table, and the instruction pointer, whatever they are
+  named. Per-build numbering, seeds, and decoys make each build a separate
+  analysis job. They don't remove the semantics from the code.
 - The field-decoding arithmetic is visible in the dispatcher. Hiding it further
-  would need a different encoding scheme, not more of the same.
-- Fine for game scripts/plugins, not hot numeric loops.
-- Error messages point at the bundled VM file/line, not your original source.
-- Requires syntactically valid Lua 5.1 or Luau source; doesn't obfuscate `.luac` bytecode.
+  would need a different encoding scheme.
+- The env-logger checks, live getters, and metamethod keys such as `__index`
+  use literal names, because Lua and the runtimes require them.
+- The cipher is a custom construction, not a standard or reviewed one. Per-build
+  constants remove fixed values, but no cryptographic strength is claimed.
+- This is identifier, control-flow, and constant obfuscation with junk and
+  opaque predicates. It is not a full anti-tamper, anti-debugger, or VM-detection
+  suite. Checksums and anti-debug checks exist, but there is no self-modifying
+  code. The goal is to raise the cost of casual copy-paste theft.
+
+**Performance:**
+
+- Interpreted, not compiled. Expect noticeably slower execution than plain Lua.
+  Suitable for game scripts and plugins, not hot numeric loops.
+- `--proxify` makes register-heavy code 1.4x to 3.4x slower.
+
+**Scope:**
+
+- Input must be valid Lua 5.1 or Luau source. Compiled `.luac` bytecode is not
+  supported.
+- Error messages point at the bundled VM file and line, not your original source.
+- SSA merges values across `if`/`else` but not across loop back edges.
+- Luau `__iter` iteration and function-expression attributes are not handled.
+  See [Luau support](#luau-support).
+- Global writes under Lute stay private to the program, as described in
+  [Running on Luau runtimes](#running-on-luau-runtimes).
 
 ## Files
 
-- `lexer.lua`, `parser.lua` -- front end (Lua 5.1 + optional Luau syntax)
-- `capture.lua` -- closure-capture analysis (used twice: pre-SSA safety, post-rename register decisions)
-- `fold.lua` -- constant-folding AST pass
-- `ssa.lua` -- SSA-style value numbering / propagation / dead-store elimination
-- `localize.lua` -- global-localization AST pass
-- `renamer.lua` -- static scope resolver / identifier renamer
-- `compiler.lua` -- AST to register bytecode (scope cells only for captured locals)
-- `junk.lua` -- JUNK injection (jump-target-safe, outside multi-result windows)
-- `obfuscator.lua` -- pipeline entry point (AST passes, then bundling and rendering)
-- `obfuscator/` -- output generation (see Project layout), including the memoized `loader.lua`
-- `obfuscate.lua` -- stable public API entry point (forwards to `src/obfuscator.lua`)
-- `xenonsec.lua` -- CLI entry point
+Module-level summary: see [Project layout](#project-layout) above. The entry
+points are `xenonsec.lua` (CLI) and `obfuscate.lua`, which forwards to
+`src/obfuscator.lua` for the public `obfuscate(src, name, opts)` API.
