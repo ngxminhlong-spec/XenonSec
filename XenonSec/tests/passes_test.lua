@@ -139,6 +139,29 @@ do
   __XS_DEC = nil
 end
 
+do
+  -- State barriers: after insertion, every jump target is either the entry or
+  -- follows a jump/return (so its decode state is always the reset value).
+  local reset = Passes.STATE_RESET
+  local src = "local x = 0 while x < 5 do if x % 2 == 0 then x = x + 1 else x = x + 2 end end print(x)"
+  local mod = compileSource(src)
+  Passes.flatten(mod, math.random, 1)
+  Passes.insertStateBarriers(mod)
+  local ok = true
+  for _, p in ipairs(mod.protos) do
+    local targets = {}
+    for _, ins in ipairs(p.code) do
+      local f = Passes.JUMP_FIELD[ins.op]
+      if f then targets[ins[f]] = true end
+    end
+    for t in pairs(targets) do
+      if t < 1 or t > #p.code then ok = false
+      elseif t > 1 and not reset[p.code[t - 1].op] then ok = false end
+    end
+  end
+  check("every jump target follows a reset or is the entry", ok)
+end
+
 -- Junk must never land inside a multi-result window. A CALLM with c = 0 is
 -- both a consumer and a producer (f(g(h())) chains them); the junk pass once
 -- missed the producer case and overwrote a middle result. These programs fail

@@ -182,4 +182,41 @@ function Passes.flatten(mod, rng, fakeScale)
 	return blocksTotal, fakeTotal, opaqueTotal
 end
 
+-- State barriers. The runtime resets its decode state after every jump and
+-- RET (see STATE_RESET). A jump target reached by fall-through from an
+-- ordinary instruction would otherwise be decoded with a state the jumps
+-- never produce, so a JMP-to-next barrier is placed in front of it. The
+-- barrier only moves control to the next instruction, so semantics do not change.
+local STATE_RESET = { JMP = true, JF = true, JT = true, JNIL = true, RET = true, RETM = true }
+Passes.STATE_RESET = STATE_RESET
+
+function Passes.insertStateBarriers(mod)
+	for _, proto in ipairs(mod.protos) do
+		local code = proto.code
+		local targets = {}
+		for _, ins in ipairs(code) do
+			local f = JUMP_FIELD[ins.op]
+			if f then targets[ins[f]] = true end
+		end
+		local out, newIdx, barrierFor = {}, {}, {}
+		for i, ins in ipairs(code) do
+			if targets[i] and i > 1 and not STATE_RESET[code[i - 1].op] then
+				out[#out + 1] = { op = "JMP", a = 0, barrier = true }
+				barrierFor[#out] = i
+			end
+			out[#out + 1] = ins
+			newIdx[i] = #out
+		end
+		for pos, ins in ipairs(out) do
+			if ins.barrier then
+				ins.a = newIdx[barrierFor[pos]]
+			else
+				local f = JUMP_FIELD[ins.op]
+				if f then ins[f] = newIdx[ins[f]] end
+			end
+		end
+		proto.code = out
+	end
+end
+
 return Passes
