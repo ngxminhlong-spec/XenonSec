@@ -180,10 +180,28 @@ return {
     local %a% = %F%.%x2%
     local %fn% = %r%[%a%]
     local %n% = %F%.%x3% - 1
+    local %c% = %F%.%x4%
+    -- Fast path: at most two arguments and one or two wanted results. The
+    -- arguments go straight into the call and the results straight into the
+    -- registers, so no argument or result tables are built.
+    if %n% <= 2 and (%c% == 2 or %c% == 3) then
+      if %c% == 2 then
+        if %n% == 0 then %r%[%a%] = %fn%()
+        elseif %n% == 1 then %r%[%a%] = %fn%(%r%[%a% + 1])
+        else %r%[%a%] = %fn%(%r%[%a% + 1], %r%[%a% + 2]) end
+      else
+        local %v1%, %v2%
+        if %n% == 0 then %v1%, %v2% = %fn%()
+        elseif %n% == 1 then %v1%, %v2% = %fn%(%r%[%a% + 1])
+        else %v1%, %v2% = %fn%(%r%[%a% + 1], %r%[%a% + 2]) end
+        %r%[%a%], %r%[%a% + 1] = %v1%, %v2%
+      end
+      %F%.%ip% = %F%.%ip% + 1
+      return
+    end
     local %args% = {}
     for %j% = 1, %n% do %args%[%j%] = %r%[%a% + %j%] end
     local %res% = %pack%(%fn%(%unpack%(%args%, 1, %n%)))
-    local %c% = %F%.%x4%
     if %c% == 0 then
       for %j% = 1, %res%.n do %r%[%a% + %j% - 1] = %res%[%j%] end
       %F%.%top% = %res%.n
@@ -222,9 +240,15 @@ return {
     if not (%OPQ_RET%) then error() end
     local %r% = %F%.%regs%
     local %n% = %F%.%x3% - 1
-    local %vals% = { n = %n% }
-    for %j% = 1, %n% do %vals%[%j%] = %r%[%F%.%x2% + %j% - 1] end
-    %F%.%ret% = %vals%
+    if %n% == 1 then
+      -- A single return value is kept in the frame, with no result table.
+      %F%.%rv% = %r%[%F%.%x2%]
+      %F%.%rn% = true
+    else
+      local %vals% = { n = %n% }
+      for %j% = 1, %n% do %vals%[%j%] = %r%[%F%.%x2% + %j% - 1] end
+      %F%.%ret% = %vals%
+    end
     %F%.%fin% = true
   end
 ]==],
