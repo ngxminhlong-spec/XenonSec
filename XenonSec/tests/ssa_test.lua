@@ -341,5 +341,152 @@ end
 print(total)
 ]])
 
+-- Structural checks on top of the output check: the regenerated source
+-- must (tHas) or must not (tNo) contain a fragment. t() counts the test
+-- itself, so a failed structural check moves it from pass to fail here.
+local function tHas(name, src, fragment)
+  local regen = t(name, src)
+  if regen and not regen:find(fragment, 1, true) then
+    pass = pass - 1
+    print("[FAIL] " .. name .. " -- regenerated code lacks: " .. fragment)
+    print("  regenerated:\n" .. regen)
+  end
+end
+local function tNo(name, src, fragment)
+  local regen = t(name, src)
+  if regen and regen:find(fragment, 1, true) then
+    pass = pass - 1
+    print("[FAIL] " .. name .. " -- regenerated code still contains: " .. fragment)
+    print("  regenerated:\n" .. regen)
+  end
+end
+
+-- Regressions found while building cross-branch propagation.
+t("REGRESSION: multi-name redeclaration clears the older tracked value", [[
+local x = 1
+local x, y = 2, 3
+print(x, y)
+]])
+
+t("REGRESSION: repeat-until reads its body-local, not the outer value", [[
+local x = 1
+local n = 0
+repeat
+  local x = 2
+  n = n + 1
+until x == 2
+print("done", n)
+]])
+
+t("REGRESSION: call in the same statement can change a captured value", [[
+local x = 1
+local function f() x = 2; return 0 end
+print(f(), x)
+]])
+
+-- Cross-branch propagation.
+tHas("phi: identical literals on every falling-through path stay known", [[
+local x = 0
+if os.time() > 0 then x = 1 else x = 1 end
+print(x)
+]], "print(1)")
+
+tHas("phi: implicit else leaves a value known when the then-branch agrees", [[
+local x = 1
+if os.time() > 0 then x = 1 end
+print(x)
+]], "print(1)")
+
+t("phi: disagreeing branches do not leak a value", [[
+local x = 0
+if os.time() > 0 then x = 1 else x = 2 end
+print(x)
+]])
+
+t("phi: a branch that returns does not block the merge", [[
+local function f()
+  local x = 5
+  if os.time() < 0 then return 0 end
+  print(x)
+  return x
+end
+print(f())
+]])
+
+tHas("values flow into an if body", [[
+local n = 3
+if os.time() > 0 then print(n) end
+]], "print(3)")
+
+tHas("values flow into a loop body that does not change them", [[
+local k = 5
+for i = 1, 2 do print(k) end
+]], "print(5)")
+
+t("loop variable shadows an outer tracked name", [[
+local i = 99
+for i = 1, 2 do print(i) end
+print(i)
+]])
+
+t("branch-local declaration does not leak out of its branch", [[
+local x = 1
+if os.time() > 0 then
+  local x = 5
+  print(x)
+end
+print(x)
+]])
+
+
+t("do-block assignment is visible after the block", [[
+local x = 1
+do x = 2 end
+print(x)
+]])
+
+t("break from a branch is not a fall-through path", [[
+local x = 1
+while true do
+  if os.time() > 0 then x = 2; break end
+end
+print(x)
+]])
+
+tNo("constant false condition removes its branch", [[
+local DEBUG = false
+if DEBUG then print("debug-only") end
+print("ok")
+]], "debug-only")
+
+tNo("constant true condition collapses to its body", [[
+local FAST = true
+if FAST then print("fast") else print("slow") end
+]], "slow")
+
+t("constant condition with an elseif chain", [[
+local MODE = 2
+if MODE == 1 then print("one")
+elseif MODE == 2 then print("two")
+else print("other") end
+]])
+
+t("repeat body local shadows a tracked name in a closure", [[
+local x = 7
+local n = 0
+repeat
+  local x = n
+  local function get() return x end
+  n = n + 1
+until get() >= 2
+print(n)
+]])
+
+t("REGRESSION: a dead local whose name is later reassigned must not leak a global", [[
+local x = 1
+x = 2
+print("end", rawget(_G, "x"))
+]])
+
 print()
 print(pass .. " / " .. total .. " ssa tests passed")

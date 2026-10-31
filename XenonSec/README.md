@@ -521,7 +521,7 @@ unary operator: zero matches.
 | **Decoy constants** | Random unreferenced junk entries shuffled into the pool. |
 | **Junk instructions** | `JUNK` writes into a scratch register no real instruction uses, spliced at random points, never inside a variable-length result window, with exact jump-target remapping. |
 | **Global localization** | Read-only globals get cached into a local once at the top; anything ever reassigned while global is excluded, so real global mutation always still works. |
-| **Constant folding + SSA-style optimization** | Literal arithmetic folded at build time; a real value-numbering pass does copy/constant propagation and dead-store elimination across straight-line runs (see the notes below for exactly what "real" means here and a bug that was found and fixed in it). |
+| **Constant folding + SSA-style optimization** | Literal arithmetic folded at build time; a real value-numbering pass does copy/constant propagation and dead-store elimination, including across `if`/`else` merges (a value survives a merge only when every falling-through branch agrees on it) and into `if`/loop bodies. Constant `if` conditions are collapsed. See the notes below for exactly what "real" means here and the bugs that were found and fixed in it. |
 | **Register VM** | Uncaptured locals and all temporaries live in registers; there is no value stack. Captured locals keep the proven cell/scope-chain mechanism. |
 | **Heavy minification** | The VM/header scaffolding is stripped of comments and collapsed to a handful of space-joined lines before the (already-encrypted) payload is spliced in. |
 | **Single-closure output** | The entire file is `return (function(...) ... end)(...)` — nothing (opcode numbers, decode key, consts, protos, helper names) sits at the chunk's top level at all. |
@@ -589,16 +589,25 @@ reference able to mutate them. Four dedicated regression tests cover
 this specific class of bug now, alongside the closures/loop-variable
 class of bug documented below.
 
-### Why not a fully general, phi-node/CFG-based SSA?
+### What "cross-branch" means here, and what it still doesn't do
 
-Full SSA construction builds a control-flow graph and inserts
-phi-functions at every branch merge point -- genuine, larger scope (CFG
-construction, dominance frontiers, phi placement) than what's here.
-What's implemented instead reasons precisely within straight-line runs
-and treats every branch/loop/closure boundary as an opacity wall,
-which is sound but doesn't merge information back together across
-branches the way phi-functions would. Real, tested, and honestly
-scoped -- not a rebrand of something smaller.
+The SSA pass now merges values across branches, the way a phi-function
+would for a simple case. After `if c then x = 1 else x = 1 end`, a later
+`print(x)` sees the literal `1`. Where the branches disagree, the merge
+drops the value and nothing is propagated. A branch that always returns,
+breaks, or continues doesn't contribute to the merge. An `if` with no
+`else` counts as an else that changes nothing. A condition that is a
+literal after propagation (for example `if DEBUG then` with `DEBUG = false`)
+is collapsed to the branch that runs.
+
+Loops are conservative. Values the loop body can change are forgotten at
+loop entry, and a value is never carried around a back edge. Full
+phi-functions at loop headers with fixed-point iteration are not built,
+so this is not a complete CFG-based SSA. Closures and any statement
+containing a call remain opacity walls for captured names, for the same
+reason as the bug described above. The implementation is sound on the
+cases it handles and is tested against real output in
+`tests/ssa_test.lua`.
 
 ### Why not a fully general, liveness-allocated register VM?
 
@@ -624,7 +633,7 @@ scope-chain path are tested for this specifically, including with
 
 - `run_tests.lua` -- 38 differential tests (reference interpreter vs. native Lua).
 - `e2e_test.lua` -- 20 tests against the actual generated output file with every pass active together.
-- `ssa_test.lua` -- 25 tests against the SSA pass specifically, including the two regression classes above.
+- `ssa_test.lua` -- 43 tests against the SSA pass specifically, including the regression classes above and cross-branch merge cases.
 - `luau_test.lua` -- 9 tests against the full obfuscated pipeline for every Luau feature, diffed against hand-written plain-Lua-5.1 oracles.
 - `passes_test.lua` -- 12 pass-level tests, including a regression test for junk landing inside a multi-result call window (`f(g(h()))`).
 - `mutate_test.lua` -- 16 tests: standard-library lookups, the constant-cache flush, per-build cipher constants, and handler-key spread.
@@ -679,7 +688,7 @@ output has to run from the file, so the reader can always see it.
   anti-debugger/VM-detection-resistance suite. No checksumming, no
   debugger-detection, no self-modifying code. Raises the cost of
   casual copy-paste theft; not a cryptographic guarantee.
-- The SSA pass doesn't optimize across branches (no phi-functions).
+- The SSA pass merges values across `if`/`else` but not across loop back edges (no loop-header phi-functions); see the SSA notes.
 - `--proxify` makes register-heavy code 1.4x to 3.4x slower (see the ProxifyLocal section). It is opt-in for that reason.
 - Interpreter, not compiled code -- noticeably slower than plain Lua. The
   handler-table VM costs roughly 25% more runtime than the previous
