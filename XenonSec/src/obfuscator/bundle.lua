@@ -242,12 +242,44 @@ local function buildBundle(mod, opts)
   -- Per-build tag bytes for the constant type marks (N = number, S = string).
   local tagPerm = shuffledRange(255)
   local tagN, tagS = tagPerm[1], tagPerm[2]
+  local tagF, tagZ, tagNaN = tagPerm[3], tagPerm[4], tagPerm[5]
   local vaultData = buildVault(key)
   local cipherConsts = {}
+  -- Number encoding is lossless. tostring() keeps only 14 digits and drops the
+  -- sign of -0.0, so:
+  --   tagN: integer, stored as (v + maskA) with %.17g, decoded back by - maskA
+  --   tagF: float, %.17g (17 digits round-trip a double); integral forms get ".0"
+  --         so Lua 5.3 keeps them as floats
+  --   tagZ: -0.0      tagNaN: nan      (inf is tagF as 1e999 / -1e999)
+  local function formatFloat(x)
+    if x == math.huge then return "1e999" end
+    if x == -math.huge then return "-1e999" end
+    local s = string.format("%.17g", x)
+    if not s:find("[%.eE]") then s = s .. ".0" end
+    return s
+  end
+  local function isInteger(x)
+    if math.type then return math.type(x) == "integer" end
+    return x == math.floor(x) and x > -2^53 and x < 2^53
+  end
   for i, v in ipairs(shuffledConsts) do
     local tagged
     if type(v) == "number" then
-      tagged = string.char(tagN) .. tostring(v + maskA)
+      if v ~= v then
+        tagged = string.char(tagNaN)
+      elseif v == 0 and 1 / v < 0 then
+        tagged = string.char(tagZ)
+      elseif math.type and isInteger(v) and v > -2^62 and v < 2^62 then
+        -- Lua 5.3: format the masked integer exactly. %.17g would convert it
+        -- through a double and round values near 2^53.
+        tagged = string.char(tagN) .. string.format("%d", v + maskA)
+      elseif isInteger(v) and v > -2^52 and v < 2^52 then
+        -- Lua 5.1 (no integer subtype): every number is a double, and the
+        -- masked sum stays exact in this range.
+        tagged = string.char(tagN) .. string.format("%.17g", v + maskA)
+      else
+        tagged = string.char(tagF) .. formatFloat(v)
+      end
     else
       tagged = string.char(tagS) .. v
     end
@@ -402,7 +434,7 @@ local function buildBundle(mod, opts)
     sm1 = vaultData.sm1,
     sm2 = vaultData.sm2,
     vsum = vaultData.vsum,
-    tagN = tagN,
+    tagN = tagN, tagF = tagF, tagZ = tagZ, tagNaN = tagNaN,
     tagS = tagS,
     antiIdx = antiIdx,
     saltM3 = saltM3, stepA = stepA, stepB = stepB, stepC = stepC,

@@ -24,6 +24,9 @@ end
 local %maskA% = __XS_MASKA__
 local %tagN% = __XS_TAGN__
 local %tagS% = __XS_TAGS__
+local %tagF% = __XS_TAGF__
+local %tagZ% = __XS_TAGZ__
+local %tagNaN% = __XS_TAGNAN__
 
 -- Key vault. The key is never stored as a list. Each key byte is split into
 -- three XOR shares; every share sits at a shuffled position in one masked
@@ -376,7 +379,11 @@ local %consts% = setmetatable({}, { __index = function(%ct%, %i2%)
   local %dv% = %decode%(%raw%[%i2%])
   local %tg% = %dv%:byte(1)
   local %val%
-  if %tg% == %tagN% then %val% = tonumber(%dv%:sub(2)) - %maskA% else %val% = %dv%:sub(2) end
+  if %tg% == %tagN% then %val% = tonumber(%dv%:sub(2)) - %maskA%
+  elseif %tg% == %tagF% then %val% = tonumber(%dv%:sub(2))
+  elseif %tg% == %tagZ% then %val% = -1.0 * 0.0
+  elseif %tg% == %tagNaN% then %val% = 0.0 / 0.0
+  else %val% = %dv%:sub(2) end
   rawset(%ct%, %i2%, %val%)
   return %val%
 end })
