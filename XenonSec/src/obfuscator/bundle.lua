@@ -269,7 +269,13 @@ local function buildBundle(mod, opts)
         tagged = string.char(tagNaN)
       elseif v == 0 and 1 / v < 0 then
         tagged = string.char(tagZ)
-      elseif isInteger(v) and v > -2^53 and v < 2^53 then
+      elseif math.type and isInteger(v) and v > -2^62 and v < 2^62 then
+        -- Lua 5.3: format the masked integer exactly. %.17g would convert it
+        -- through a double and round values near 2^53.
+        tagged = string.char(tagN) .. string.format("%d", v + maskA)
+      elseif isInteger(v) and v > -2^52 and v < 2^52 then
+        -- Lua 5.1 (no integer subtype): every number is a double, and the
+        -- masked sum stays exact in this range.
         tagged = string.char(tagN) .. string.format("%.17g", v + maskA)
       else
         tagged = string.char(tagF) .. formatFloat(v)

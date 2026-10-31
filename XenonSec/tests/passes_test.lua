@@ -196,7 +196,8 @@ end
 do
   -- Number constants round-trip exactly: full float precision, integers past
   -- 14 digits, -0.0, inf, nan, and integral floats keep their float type.
-  local src = "print(1/3, 0.1 + 0.2, 123456789012345, 2^53 + 2, -0.0, 1/(-0.0), 1/0, 3.0, 2^60, 0/0 ~= 0/0)\n"
+  local src = "print(1/3, 0.1 + 0.2, 123456789012345, 2^53 + 2, -0.0, 1/(-0.0), 1/0, 3.0, 2^60, 0/0 ~= 0/0)\n" ..
+              "print(9007199254740991, -9007199254740991, 4611686018427387903, math.type and math.type(9007199254740991))\n"
   local function run(chunk)
     local got, realPrint = {}, print
     print = function(...)
@@ -206,7 +207,7 @@ do
     end
     local ok = pcall(chunk)
     print = realPrint
-    return ok, got[1]
+    return ok, table.concat(got, "\n")
   end
   local okP, plainOut = run(load(src, "cplain"))
   local okO, obfOut = run(load(Obf.obfuscate(src, "cobf", {}), "cobf"))
