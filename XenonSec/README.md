@@ -383,7 +383,7 @@ no alias analysis.
 Operations that can run Lua code invalidate captured names they might change.
 That includes calls, indexing, and operators that can reach a metamethod (for
 example `a + 1` with an `__add` that assigns a captured local). Only `and`,
-`or`, and `not` are known to run no code. Here is why any of this matters. A
+`or`, and `not` are known to run no code, and a store through an index (`t.a = v`) always counts, since `__newindex` can run. Here is why any of this matters. A
 function call can mutate a variable through a closure that captured it, even
 with no visible assignment in between:
 
@@ -507,7 +507,7 @@ XenonSec/
 |---|---|---|
 | Differential tests (reference VM vs. native Lua) | `run_tests.lua` | 38 / 38 |
 | End-to-end, every pass on | `e2e_test.lua` | 20 / 20 |
-| SSA pass, including regression, cross-branch, and loop phi cases | `ssa_test.lua` | 57 / 57 |
+| SSA pass, including regression, cross-branch, and loop phi cases | `ssa_test.lua` | 58 / 58 |
 | Luau features, against plain-Lua oracles | `luau_test.lua` | 12 / 12 |
 | Pass-level, including junk inside `f(g(h()))` windows | `passes_test.lua` | 12 / 12 |
 | Standard-library lookups, cache flush, cipher constants | `mutate_test.lua` | 16 / 16 |

@@ -96,7 +96,8 @@ local function statementContainsCall(s)
   elseif kind == "Assign" then
     if listContainsCall(s.values) then return true end
     for _, t in ipairs(s.targets) do
-      if t.kind == "Index" and (exprContainsCall(t.obj) or exprContainsCall(t.key)) then return true end
+      -- Storing through an index can run __newindex, so it always counts.
+      if t.kind == "Index" then return true end
     end
     return false
   elseif kind == "ExprStat" then
