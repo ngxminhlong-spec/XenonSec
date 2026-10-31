@@ -217,6 +217,9 @@ local function obfuscateOnce(source, chunkname, opts)
   header = header:gsub("__XS_VSUM__", tostring(bundle.vsum))
   header = header:gsub("__XS_TAGN__", tostring(bundle.tagN))
   header = header:gsub("__XS_TAGS__", tostring(bundle.tagS))
+  header = header:gsub("__XS_TAGF__", tostring(bundle.tagF))
+  header = header:gsub("__XS_TAGZ__", tostring(bundle.tagZ))
+  header = header:gsub("__XS_TAGNAN__", tostring(bundle.tagNaN))
   for nm, idx in pairs(bundle.antiIdx) do
     header = header:gsub("__XS_NM_" .. nm:upper() .. "__", tostring(idx))
   end

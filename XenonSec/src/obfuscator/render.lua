@@ -212,7 +212,12 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
         "  return r",
         "end",
         "local function " .. OK .. "(x, y)",
-        "  return type(x) == 'number' and type(y) == 'number' and x >= 0 and y >= 0 and x < 67108864 and y < 67108864 and x % 1 == 0 and y % 1 == 0",
+        -- -0.0 is excluded: it passes the range checks, but the helpers return +0,
+        -- and later code can tell the signs apart with 1 / result.
+        "  if type(x) ~= 'number' or type(y) ~= 'number' then return false end",
+        "  if x < 0 or y < 0 or x >= 67108864 or y >= 67108864 then return false end",
+        "  if x % 1 ~= 0 or y % 1 ~= 0 then return false end",
+        "  return (x ~= 0 or 1 / x > 0) and (y ~= 0 or 1 / y > 0)",
         "end",
         "local function " .. AD .. "(x, y) return " .. BX .. "(x, y) + 2 * " .. BA .. "(x, y) end",
         "local function " .. SB .. "(x, y) return " .. BX .. "(x, y) - 2 * y + 2 * " .. BA .. "(x, y) end",
