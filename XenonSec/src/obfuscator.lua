@@ -37,6 +37,7 @@ local FOOTER_TEMPLATE = load("templates/footer")
 local HEADER_TEMPLATE = load("templates/header")
 local VM_TEMPLATE = load("templates/vm")
 local CORE_BLOCKS = load("templates/core_handlers")
+local CORE_VARIANTS = load("templates/core_variants")
 local _tm = load("typemangler")
 local buildTypeMangler, scatterType = _tm.buildTypeMangler, _tm.scatterType
 
@@ -152,7 +153,8 @@ local function obfuscateOnce(source, chunkname, opts)
       proxify = opts.proxify and true or false, PA = proxyA, PB = proxyB, PM = PROXY_M,
       freeKey = bundle.freeKey, decoyCount = bundle.decoyCount,
       flush = opts.flushConsts and true or false, flushEvery = opts.flushEvery or 65536,
-      coreBlocks = CORE_BLOCKS, wm = bundle.watermarkIdx, three = bundle.threeIdx,
+      coreBlocks = CORE_BLOCKS, coreVariants = CORE_VARIANTS,
+      wm = bundle.watermarkIdx, three = bundle.threeIdx,
       minifyFn = opts.minify and minifyTemplateText or nil, luauTypes = useTypes,
       scatterType = scatterType })
 

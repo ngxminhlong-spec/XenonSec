@@ -130,6 +130,16 @@ in registers. A block creates a scope only when it declares a captured local.
 frame's probe counter, built from number-theoretic identities that hold for
 every integer, so they only add analysis noise.
 
+**Metamorphic handlers.** Several core handlers have more than one body. A
+build picks one of them at random, uniformly, so two builds of the same script
+expose different handler code. The alternatives (`templates/core_variants.lua`)
+change statement order, local aliases, and expression shape, but do the same
+thing as the default body and keep the same gate and `ip` update. The default
+bodies are in `templates/core_handlers.lua`. The handler self-test runs the
+chosen bodies at startup, so a variant that changed behavior bricks the build
+instead of passing quietly. This changes what each build's handlers look like.
+It does not change what they compute, and the VM stays readable Lua.
+
 **Speed.** On a fib + loop benchmark, the current register VM ran in about 703
 ms, compared with about 1638 ms for the earlier chain-based VM and about 2545
 ms for the earlier stack VM. These were measured on the versions at the time,
@@ -511,7 +521,7 @@ XenonSec/
 | SSA pass, including regression, cross-branch, and loop phi cases | `ssa_test.lua` | 58 / 58 |
 | Luau features, against plain-Lua oracles | `luau_test.lua` | 12 / 12 |
 | Pass-level, including junk inside `f(g(h()))` windows | `passes_test.lua` | 12 / 12 |
-| Standard-library lookups, cache flush, cipher constants | `mutate_test.lua` | 16 / 16 |
+| Standard-library lookups, cache flush, cipher constants, metamorphic handlers | `mutate_test.lua` | 19 / 19 |
 | ProxifyLocal, with and without other options, plus tamper checks | `proxify_test.lua` | 31 / 31 |
 | Anti-tamper, anti-debug, no plaintext operator tables | `protection_test.lua` | 19 / 19 |
 | Lune and Lute differential suite (10 programs x 7 option sets, plus an env-logger check) | `sh tests/run_runtime.sh <runtime> texlua` | 72 / 72 on Lune |
