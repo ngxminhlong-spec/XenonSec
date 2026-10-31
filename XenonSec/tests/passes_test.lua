@@ -162,6 +162,35 @@ do
   check("every jump target follows a reset or is the entry", ok)
 end
 
+do
+  -- MBA equivalence: the obfuscated + and - must match plain Lua exactly,
+  -- for integers (both sides of the 2^26 limit), negatives, floats (including
+  -- integral floats, whose type must survive), and metamethod operands.
+  local src = [[
+local vals = { 0, 1, 2, 3, 7, 1000, 67108863, 67108864, 2^30, -5, 2.5, 1.0, 3.0, 0.5 }
+local out = {}
+for i = 1, #vals do for j = 1, #vals do
+  local a, b = vals[i], vals[j]
+  out[#out + 1] = tostring(a + b) .. "," .. tostring(a - b)
+end end
+local mt = { __add = function(x, y) return "added" end, __sub = function(x, y) return "subbed" end }
+local T = setmetatable({}, mt)
+out[#out + 1] = tostring(T + 1) .. "," .. tostring(1 - T) .. "," .. tostring("4" + 1)
+print(table.concat(out, ";"))
+]]
+  local function runCapture(chunk)
+    local captured, realPrint = {}, print
+    print = function(...) captured[#captured + 1] = table.concat({ ... }, "\t") end
+    local ok, err = pcall(chunk)
+    print = realPrint
+    return ok, table.concat(captured, "\n"), err
+  end
+  local okPlain, plainOut = runCapture(load(src, "plain"))
+  local okObf, obfOut = runCapture(load(Obf.obfuscate(src, "mba", {}), "mba"))
+  check("MBA arithmetic matches plain Lua", okPlain and okObf and plainOut == obfOut,
+    ("plain=%s obf=%s"):format(tostring(okPlain), tostring(okObf)))
+end
+
 -- Junk must never land inside a multi-result window. A CALLM with c = 0 is
 -- both a consumer and a producer (f(g(h())) chains them); the junk pass once
 -- missed the producer case and overwrote a middle result. These programs fail

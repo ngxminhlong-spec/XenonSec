@@ -35,9 +35,10 @@ end
 
 local function %truthy%(%v%) return %v% ~= nil and %v% ~= false end
 
+%MBA_HELPERS%
 local %BINOPS% = {
-  [%BN_PLUS%] = function(%a%, %b%) return %a% + %b% end,
-  [%BN_MINUS%] = function(%a%, %b%) return %a% - %b% end,
+  [%BN_PLUS%] = function(%a%, %b%) %ARITH_ADD% end,
+  [%BN_MINUS%] = function(%a%, %b%) %ARITH_SUB% end,
   [%BN_MUL%] = function(%a%, %b%) return %a% * %b% end,
   [%BN_DIV%] = function(%a%, %b%) return %a% / %b% end,
   [%BN_MOD%] = function(%a%, %b%) return %a% % %b% end,
