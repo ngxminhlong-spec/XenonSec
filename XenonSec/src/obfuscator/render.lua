@@ -84,6 +84,17 @@ end
 -- identifier (memoized so the same placeholder always maps to the same
 -- generated name within this one render).
 
+-- Metamorphic choice: a core handler is the default block or one of its
+-- alternatives from templates/core_variants.lua, picked uniformly per build.
+local function pickCoreVariant(block, variants)
+  local op = variants and block:match("%%H%%%[%%(OP_[%w_]+)%%%]")
+  local alts = op and variants[op]
+  if not alts then return block end
+  local n = math.random(0, #alts)
+  if n == 0 then return block end
+  return alts[n]
+end
+
 local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDebug, KV)
   local nameCache = {}
   local function ensureName(tok)
@@ -104,7 +115,7 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
         ensureName("varsField"), ensureName("parentField"))
     end
     for _, bi in ipairs(shuffledRange(#KV.coreBlocks)) do
-      local blk = KV.coreBlocks[bi]
+      local blk = pickCoreVariant(KV.coreBlocks[bi], KV.coreVariants)
       if KV.minifyFn then blk = KV.minifyFn(blk) end
       parts[#parts + 1] = substitute(blk, resolve)
       if KV.luauTypes and math.random() < 0.6 then parts[#parts + 1] = KV.scatterType() end

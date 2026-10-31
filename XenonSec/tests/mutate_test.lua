@@ -115,5 +115,33 @@ do
     count > 0 and maxKey <= count + 28, ("literal keys=%d largest=%d"):format(count, maxKey))
 end
 
+-- 17. Metamorphic handlers: builds of one script differ in the shape of their
+--     core handler code, and every build still produces the native output.
+do
+  local src = [[
+local t = {}
+for i = 1, 6 do t[i] = i * i end
+local flag = false
+if flag then print("no") else print("yes", t[6]) end
+local o = setmetatable({}, {__index = function(_, k) return k .. "!" end})
+print(#t, t[1] or "x", o.key)
+]]
+  local ok0, _, want = capture(assert(load(src, "native")))
+  check("metamorphic: native reference runs", ok0)
+  local shapes, mismatches = {}, 0
+  for _ = 1, 12 do
+    local out = Obf.obfuscate(src, "t", { minSize = false, luau = false })
+    shapes[out] = true
+    local ok, err, got = capture(assert(load(out, "t")))
+    if not ok or got ~= want then mismatches = mismatches + 1 end
+  end
+  local distinct = 0
+  for _ in pairs(shapes) do distinct = distinct + 1 end
+  check("metamorphic: every build matches the native output", mismatches == 0,
+    ("%d of 12 builds differ"):format(mismatches))
+  check("metamorphic: builds of one script are not byte-identical", distinct > 1,
+    ("%d distinct output(s) from 12 builds"):format(distinct))
+end
+
 print(("\nmutate suite: %d / %d tests passed"):format(pass, total))
 if pass ~= total then os.exit(1) end
