@@ -627,5 +627,14 @@ local z = x
 print("z", z, y)
 ]])
 
+t("REGRESSION: an indexed store that runs __newindex does not leave a captured local stale", [[
+local x
+local t = setmetatable({}, {__newindex = function() x = 2 end})
+x = 1
+t.a = 0
+local y = x
+print("y", y, x)
+]])
+
 print()
 print(pass .. " / " .. total .. " ssa tests passed")
