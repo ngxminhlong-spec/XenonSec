@@ -270,6 +270,37 @@ local function obfuscateOnce(source, chunkname, opts)
   -- file is a single `return (function(...) ... end)(...)` expression
   -- -- nothing (opcode numbers, decode key, helper names, consts,
   -- protos) sits at the chunk's top level at all.
+  -- Build-time hashes for the anti-debug code check (see ckDump in the header).
+  -- The header is run once inside the same wrapper as the output, with the
+  -- hash placeholders zeroed, and string.dump(check, true) is taken of each
+  -- check. Lua 5.3 only; Luau builds (useTypes) and other hosts keep zeros.
+  local function luaQuote(str)
+    return '"' .. str:gsub("[%c\"\\\128-\255]", function(c) return string.format("\\%03d", c:byte()) end) .. '"'
+  end
+  local ckHashes, dumpPrefix = { 0, 0, 0, 0 }, ""
+  if opts.antiDebug and not useTypes and _VERSION == "Lua 5.3" then
+    local zeroed = (header:gsub("__XS_CKH__", "0,0,0,0"))
+    zeroed = (zeroed:gsub("__XS_DPFX__", '""'))
+    local probeSrc = "return (function(...)\n" .. zeroed .. "\nreturn " ..
+      resolveShared("CKS") .. "\nend)(...)\n"
+    local fn, loadErr = _G.load(probeSrc, "=probe")
+    assert(fn, "XenonSec: anti-debug probe failed to load: " .. tostring(loadErr))
+    local okRun, checks = pcall(fn)
+    assert(okRun and type(checks) == "table", "XenonSec: anti-debug probe did not run: " .. tostring(checks))
+    local function hashOf(str)
+      local h = 5381
+      for j = 1, #str do h = (h * 31 + str:byte(j)) % 2147483647 end
+      return h
+    end
+    for i = 1, 4 do
+      local dump = string.dump(checks[i], true)
+      ckHashes[i] = hashOf(dump)
+      if i == 1 then dumpPrefix = dump:sub(1, 33) end
+    end
+  end
+  header = header:gsub("__XS_CKH__", (table.concat(ckHashes, ","):gsub("%%", "%%%%")))
+  header = header:gsub("__XS_DPFX__", (luaQuote(dumpPrefix):gsub("%%", "%%%%")))
+
   local combined = header .. "\n" .. footer
   return "return (function(...)\n" .. combined .. "\nend)(...)\n"
 end

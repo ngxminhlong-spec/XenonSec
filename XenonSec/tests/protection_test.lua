@@ -367,5 +367,31 @@ do
   check("antiDebug off places no periodic checks", plainCalls == 0, "placements=" .. plainCalls)
 end
 
+do
+  -- Code check: editing one anti-debug check's code is caught even with no
+  -- debugger attached. The build hashes each check's stripped bytecode, and
+  -- the run compares it with the hash the build recorded (Lua 5.3 builds).
+  if _VERSION == "Lua 5.3" then
+    local src = 'print("clean run")'
+    local out = Obf.obfuscate(src, "t", { antiDebug = true })
+    local clean = load(out, "t")
+    local captured = {}
+    local realPrint = print
+    print = function(...) captured[#captured + 1] = table.concat({ ... }, "\t") end
+    local okClean = pcall(clean)
+    print = realPrint
+    check("unedited anti-debug build runs with no debugger", okClean and #captured == 1)
+    local tampered, n = out:gsub("return 53", "return 54", 1)
+    check("tamper target found in the output", n == 1, "n=" .. n)
+    local bad = load(tampered, "t")
+    captured = {}
+    print = function(...) captured[#captured + 1] = table.concat({ ... }, "\t") end
+    local okBad = pcall(bad)
+    print = realPrint
+    check("an edited check is caught with no debugger attached", not okBad and #captured == 0,
+      ("ok=%s captured=%d"):format(tostring(okBad), #captured))
+  end
+end
+
 print()
 print(pass .. " / " .. total .. " anti-tamper/anti-debug tests passed")

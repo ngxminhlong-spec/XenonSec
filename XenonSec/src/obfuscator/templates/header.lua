@@ -413,9 +413,30 @@ local %ck4% = function()
   return 0
 end
 local %CKS% = { %ck1%, %ck2%, %ck3%, %ck4% }
+-- Code check: each check's string.dump (stripped) hashed at build time. The
+-- build fills %CKH% and %DPFX%; a zero hash disables that check (Luau, or a
+-- build made without a Lua 5.3 probe). A dump of another Lua version or
+-- platform does not start with %DPFX%, so the test is skipped there.
+local %CKH% = { __XS_CKH__ }
+local %DPFX% = __XS_DPFX__
+local %sdump% = string and string.dump
+local function %ckDump%(%f%)
+  if not %sdump% then return nil end
+  local %ok%, %s% = %pcallC%(%sdump%, %f%, true)
+  if not %ok% or type(%s%) ~= "string" then return nil end
+  if %s%:sub(1, #%DPFX%) ~= %DPFX% then return nil end
+  local %h% = 5381
+  for %j% = 1, #%s% do %h% = (%h% * 31 + %s%:byte(%j%)) % 2147483647 end
+  return %h%
+end
 %adStep% = function(%si%)
   if not __XS_ANTIDEBUG__ then return end
   %adMix% = (%adMix% + %CKS%[%si%]()) % 65521
+  local %want% = %CKH%[%si%]
+  if %want% ~= 0 then
+    local %got% = %ckDump%(%CKS%[%si%])
+    if %got% and %got% ~= %want% then %adMix% = (%adMix% + 113) % 65521 end
+  end
 end
 if __XS_ANTIDEBUG__ then
   for %sk% = 1, 4 do %adStep%(%sk%) end
