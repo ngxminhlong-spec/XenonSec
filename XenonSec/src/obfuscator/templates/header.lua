@@ -206,10 +206,36 @@ end
 local function %decode%(%s%)
   return %decodeK%(%s%, %buildKey%())
 end
+-- Constant pool: base85 text (bundle.lua encodeB85). Decoded here, in plain
+-- Lua, because constants are needed before the engine exists (the watermark
+-- check reads one at load time). The decoder reveals only the encoding; the
+-- constants themselves stay encrypted.
+local %b85i% = {}
+do
+  local %bk% = 0
+  for %bc% = 35, 120 do
+    if %bc% ~= 92 then
+      %b85i%[%bc%] = %bk%
+      %bk% = %bk% + 1
+    end
+  end
+end
+local function %b85%(%s%, %n%)
+  local %o% = {}
+  for %g% = 0, math.floor(#%s% / 5) - 1 do
+    local %b% = %g% * 5
+    local %v% = 0
+    for %q% = 1, 5 do %v% = %v% * 85 + %b85i%[%byte%(%s%, %b% + %q%)] end
+    %o%[%g% + 1] = %char%(math.floor(%v% / 16777216) % 256, math.floor(%v% / 65536) % 256, math.floor(%v% / 256) % 256, %v% % 256)
+  end
+  return table.concat(%o%):sub(1, %n%)
+end
 local %raw% = { __XS_CIPHERS__ }
+local %clens% = { __XS_CLENS__ }
 local %protos% = { __XS_PROTOS__ }
 -- Anti-debug names are encrypted constants, decoded only when used.
-local function %dname%(%di%) return (%decode%(%raw%[%di%]):sub(2)) end
+local function %rawdec%(%ri%) return %decode%(%b85%(%raw%[%ri%], %clens%[%ri%])) end
+local function %dname%(%di%) return (%rawdec%(%di%):sub(2)) end
 
 -- Per-proto key: the build key mixed with the proto's nonce, using the same
 -- LCG as the key seed. Mirrors deriveProtoKey in bundle.lua.
@@ -394,7 +420,7 @@ __XS_ADBLOCK__
 -- program never touches is never decrypted at all.
 local %consts% = setmetatable({}, { __index = function(%ct%, %i2%)
   if __XS_ANTIDEBUG__ then %adStep%(%i2% % 5 + 1) end
-  local %dv% = %decode%(%raw%[%i2%])
+  local %dv% = %rawdec%(%i2%)
   local %tg% = %dv%:byte(1)
   local %val%
   if %tg% == %tagN% then %val% = tonumber(%dv%:sub(2)) - %maskA%

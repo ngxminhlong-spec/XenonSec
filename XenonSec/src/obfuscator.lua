@@ -175,16 +175,12 @@ local function obfuscateOnce(source, chunkname, opts)
 
   local vaultLit = table.concat(bundle.vault, ",")
   local kmapLit = table.concat(bundle.kmap, ",")
+  -- Constant pool: base85 text, so no escapes are needed (the alphabet has no
+  -- quote or backslash). Lengths go in a separate list.
   local cipherLits = {}
-  for i, c in ipairs(bundle.cipherConsts) do
-    -- %q leaves bytes >= 128 raw, which makes the file invalid UTF-8.
-    -- Escape them as 3-digit decimal escapes so the output is pure ASCII
-    -- (valid Lua 5.1 / 5.3 / Luau, and accepted by strict UTF-8 hosts).
-    cipherLits[i] = string.format("%q", c):gsub("[\128-\255]", function(ch)
-      return string.format("\\%03d", ch:byte())
-    end)
-  end
+  for i, t in ipairs(bundle.cipherText) do cipherLits[i] = '"' .. t .. '"' end
   local ciphersLit = table.concat(cipherLits, ",")
+  local cipherLensLit = table.concat(bundle.cipherLens, ",")
 
   -- Env-logger check: one direct read per builtin name (see the header).
   local protosLit = table.concat(bundle.protoLits, ",")
@@ -260,6 +256,7 @@ local function obfuscateOnce(source, chunkname, opts)
   end
   header = header:gsub("__XS_MASKA__", tostring(bundle.maskA))
   header = header:gsub("__XS_CIPHERS__", (ciphersLit:gsub("%%", "%%%%")))
+  header = header:gsub("__XS_CLENS__", cipherLensLit)
   header = header:gsub("__XS_PROTOS__", (protosLit:gsub("%%", "%%%%")))
   header = header:gsub("__XS_CHECKSUM__", tostring(bundle.checksum))
   header = header:gsub("__XS_ANTITAMPER_ON__", tostring(opts.antiTamper))

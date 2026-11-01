@@ -356,9 +356,17 @@ local function buildBundle(mod, opts)
   --    computed with the exact same arithmetic the runtime will use to
   --    recompute it -- this is the anti-tamper integrity value.
   local function mixChecksum(h, n) return (h * 31 + (n or 0)) % 2147483647 end
+  -- The constant pool is stored as base85 text (see the header's constant
+  -- decoder); each constant keeps its exact length, since the padding is
+  -- not part of the ciphertext.
+  local cipherText, cipherLens = {}, {}
+  for i, c in ipairs(cipherConsts) do
+    cipherText[i] = encodeB85(c)
+    cipherLens[i] = #c
+  end
   local checksum = 5381
-  for _, c in ipairs(cipherConsts) do
-    for i = 1, #c do checksum = mixChecksum(checksum, c:byte(i)) end
+  for _, t in ipairs(cipherText) do
+    for i = 1, #t do checksum = mixChecksum(checksum, t:byte(i)) end
   end
 
   -- Per-proto encryption. Each proto's instructions are packed into 15 bytes
@@ -479,6 +487,8 @@ local function buildBundle(mod, opts)
 
   return {
     cipherConsts = cipherConsts,
+    cipherText = cipherText,
+    cipherLens = cipherLens,
     liveNames = liveNames,
     saltM1 = saltM1,
     saltM2 = saltM2,
