@@ -70,7 +70,7 @@ local %OP_LOADK%,%OP_LOADNIL%,%OP_LOADTRUE%,%OP_LOADFALSE%,%OP_MOVE%,%OP_GETVAR%
 
 local function %run%(%mod%, ...)
   local %consts%, %protos%, %mainIdx% = %mod%[1], %mod%[2], %mod%[3]
-  local %adHook% = %mod%[4]
+  local %adStep% = %mod%[4]
   local %GETG% = %mod%[5]
   local %SETG% = %mod%[6]
   local %brick% = function()

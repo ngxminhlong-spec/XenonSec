@@ -287,5 +287,85 @@ do
   end
 end
 
+-- Keyed checks (see the anti-debug block in the header). Each case sets up one
+-- kind of debugger or tampering; detection means no program output and a
+-- failing run, because a fired check changes the decoded key.
+local function detectCase(name, src, setup, teardown)
+  local out = Obf.obfuscate(src, "t", { antiDebug = true })
+  local chunk = load(out, "t")
+  local captured = {}
+  local realPrint = print
+  print = function(...)
+    local p = {}
+    for i = 1, select("#", ...) do p[i] = tostring((select(i, ...))) end
+    captured[#captured + 1] = table.concat(p, "\t")
+  end
+  local ok, err = pcall(function()
+    local runner = setup(chunk)
+    if runner then return runner() end
+  end)
+  if teardown then teardown() end
+  print = realPrint
+  check(name, not ok and #captured == 0,
+    ("ok=%s captured=%d err=%s"):format(tostring(ok), #captured, tostring(err)))
+end
+
+do
+  -- Check 3: a wrapper around debug.gethook installed BEFORE load is caught
+  -- by the native check, because the captured hook probe is a Lua function.
+  local src = 'print("wrapped")'
+  local realGethook = debug.gethook
+  detectCase("a wrapped debug.gethook (installed before load) is detected", src,
+    function(chunk)
+      debug.gethook = function(...) return realGethook(...) end
+      local out = Obf.obfuscate(src, "t", { antiDebug = true })
+      return load(out, "t")
+    end,
+    function() debug.gethook = realGethook end)
+end
+
+do
+  -- Check 2: a hook on a running coroutine (not the main thread) is caught.
+  local src = 'print("in coroutine")'
+  detectCase("a debug hook on a coroutine is detected", src,
+    function(chunk)
+      local co = coroutine.create(chunk)
+      debug.sethook(co, function() end, "", 1000000)
+      return function() local okc, errc = coroutine.resume(co); if not okc then error(errc) end; return errc end
+    end,
+    nil)
+end
+
+do
+  -- Check 4: the debug library's fields are compared with what was captured at
+  -- load. Replacing one after load is caught by the periodic checks.
+  local src = "local n = 0 for i = 1, 50000 do n = n + i end print('done', n)"
+  local realGethook = debug.gethook
+  detectCase("a debug field replaced after load is detected (cross-check)", src,
+    function(chunk)
+      return function()
+        debug.gethook = function(...) return realGethook(...) end
+        local r = chunk()
+        return r
+      end
+    end,
+    function() debug.gethook = realGethook end)
+end
+
+do
+  -- Placement: the periodic checks are emitted at several points, and the
+  -- rest of the build is unchanged when anti-debug is off.
+  local src = "local t = 0 for i = 1, 3000 do t = t + i end print(t)"
+  -- Names are randomized, so match the shape: "if <counter> % <period> ==
+  -- <residue> then <name>(<index>) end" (the minifier may drop spaces).
+  local shape = "if [%w_%.]+%s*%%%s*%d+%s*==%s*%d+%s*then%s*[%w_]+%(%d%)%s*end"
+  local out = Obf.obfuscate(src, "t", { antiDebug = true })
+  local _, calls = out:gsub(shape, "")
+  check("anti-debug build places several periodic checks", calls >= 3, "placements=" .. calls)
+  local plain = Obf.obfuscate(src, "t", {})
+  local _, plainCalls = plain:gsub(shape, "")
+  check("antiDebug off places no periodic checks", plainCalls == 0, "placements=" .. plainCalls)
+end
+
 print()
 print(pass .. " / " .. total .. " anti-tamper/anti-debug tests passed")

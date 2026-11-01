@@ -34,6 +34,11 @@ local %kmap% = { __XS_KMAP__ }
 local %sm1%, %sm2% = __XS_SM1__, __XS_SM2__
 local %vsum% = __XS_VSUM__
 local %kbad% = false
+-- Anti-debug state. %adMix% is the sum of the check results (0 while nothing
+-- is seen); %buildKey% folds it into the key. %adStep% is assigned in the
+-- anti-debug block below and called from several places in the code.
+local %adMix% = 0
+local %adStep% = function() end
 
 -- Tripwire: a weighted sum over the whole vault. Editing any byte changes it,
 -- which marks the key bad (see %corrupt%).
@@ -55,7 +60,11 @@ local function %buildKey%()
     local %c% = (%vault%[%pc%] - (%pc% * %sm1% + %sm2%) % 256) % 256
     %k%[%i%] = %bxor%(%bxor%(%a%, %b%), %c%)
   end
-  if %kbad% then for %i% = 1, %n% do %k%[%i%] = (%k%[%i%] + 97) % 256 end end
+  -- Clean builds: both terms are zero and the key is unchanged. A check that
+  -- fired shifts every byte, so decoding silently produces wrong values.
+  if %kbad% or %adMix% ~= 0 then
+    for %i% = 1, %n% do %k%[%i%] = (%k%[%i%] + (%kbad% and 97 or 0) + %adMix% * %i%) % 256 end
+  end
   return %k%
 end
 
@@ -214,6 +223,7 @@ end
 -- can run them; a mismatch leaves no usable opcodes.
 local function %dproto%(%pr%)
   local %pk% = %pkey%(%buildKey%(), %pr%.n)
+  %adStep%(%pr%.n % 4 + 1)
   local %plain% = %decodeK%(%pr%.b, %pk%)
   local %code% = {}
   local %dh% = 5381
@@ -335,44 +345,86 @@ local %SETG% = function(%k%, %v%)
   else %priv%[%k%] = (%v% == nil) and %NILH% or %v% end
 end
 
+-- Captured at load, before any program code runs. The checks compare against
+-- these values, not against whatever the globals hold later.
+local %pcallC% = pcall
 local %dbgLib% = nil
 local %hookFn% = nil
+local %infoFn% = nil
+local %coRunFn% = nil
+-- Names used by the checks, decoded once here so a check costs table lookups
+-- and no decoding.
+local %NM% = {}
 if __XS_ANTIDEBUG__ then
-  local %dok%, %dlib% = pcall(function() return %base%[%dname%(__XS_NM_DEBUG__)] end)
+  %NM%.debug = %dname%(__XS_NM_DEBUG__)
+  %NM%.gethook = %dname%(__XS_NM_GETHOOK__)
+  %NM%.getinfo = %dname%(__XS_NM_GETINFO__)
+  %NM%.coroutine = %dname%(__XS_NM_COROUTINE__)
+  %NM%.running = %dname%(__XS_NM_RUNNING__)
+  local %dok%, %dlib% = %pcallC%(function() return %base%[%NM%.debug] end)
   if %dok% and %dlib% then
-    local %gok%, %gfn% = pcall(function() return %dlib%[%dname%(__XS_NM_GETHOOK__)] end)
-    if %gok% and %gfn% then %dbgLib% = %dlib%; %hookFn% = %gfn% end
+    local %gok%, %gfn% = %pcallC%(function() return %dlib%[%NM%.gethook] end)
+    local %iok%, %ifn% = %pcallC%(function() return %dlib%[%NM%.getinfo] end)
+    if %gok% and %gfn% and %iok% and %ifn% then
+      %dbgLib% = %dlib%; %hookFn% = %gfn%; %infoFn% = %ifn%
+    end
   end
+  local %cok%, %cof% = %pcallC%(function() return %base%[%NM%.coroutine][%NM%.running] end)
+  if %cok% and %cof% then %coRunFn% = %cof% end
 end
 
--- Hook probe shared by the startup check and the periodic check that runs
--- inside the VM dispatch loop (see %ADCHECK%). It looks at the main hook and
--- at the hook of the running coroutine, since a debugger can attach to either.
-local %adHook% = function()
-  if not %hookFn% then return false end
-  local %hok%, %hfn% = pcall(%hookFn%)
-  if %hok% and %hfn% ~= nil then return true end
-  local %cok%, %co% = pcall(function() return %base%[%dname%(__XS_NM_COROUTINE__)][%dname%(__XS_NM_RUNNING__)]() end)
-  if %cok% and %co% then
-    local %ghok%, %ghf% = pcall(%hookFn%, %co%)
-    if %ghok% and %ghf% ~= nil then return true end
-  end
-  return false
+-- Each check returns a number: 0 when it sees nothing, nonzero when it does.
+-- Nothing branches on a check's outcome. The result is summed into %adMix%
+-- and the key is derived from it, so removing one check's effect changes the
+-- decoded values, not just one flag.
+-- 1: a debug hook is set on the main thread.
+local %ck1% = function()
+  if not %hookFn% then return 0 end
+  local %ok%, %h%  = %pcallC%(%hookFn%)
+  if %ok% and %h% ~= nil then return 53 end
+  return 0
 end
-
--- Native check: the hook probe must be the engine's own C function. Hook
--- tooling is typically installed by wrapping it in a Lua function.
+-- 2: a debug hook is set on the running coroutine.
+local %ck2% = function()
+  if not (%hookFn% and %coRunFn%) then return 0 end
+  local %ok%, %co% = %pcallC%(%coRunFn%)
+  if not (%ok% and %co%) then return 0 end
+  local %gok%, %gh% = %pcallC%(%hookFn%, %co%)
+  if %gok% and %gh% ~= nil then return 61 end
+  return 0
+end
+-- 3: the captured debug functions must themselves be the engine's C functions
+-- (a wrapper installed before load is a Lua function).
+local %ck3% = function()
+  if not (%dbgLib% and %hookFn% and %infoFn%) then return 0 end
+  local %a%, %ai% = %pcallC%(%infoFn%, %infoFn%, "S")
+  if %a% and %ai% and %ai%.what ~= "C" then return 71 end
+  local %b%, %bi% = %pcallC%(%infoFn%, %hookFn%, "S")
+  if %b% and %bi% and %bi%.what ~= "C" then return 89 end
+  return 0
+end
+-- 4: the debug library and its fields still hold what was captured at load.
+-- This also covers check 3's inputs, so the checks watch each other.
+local %ck4% = function()
+  if not %dbgLib% then return 0 end
+  if %base%[%NM%.debug] ~= %dbgLib% then return 97 end
+  if %dbgLib%[%NM%.gethook] ~= %hookFn% then return 41 end
+  if %dbgLib%[%NM%.getinfo] ~= %infoFn% then return 13 end
+  return 0
+end
+local %CKS% = { %ck1%, %ck2%, %ck3%, %ck4% }
+%adStep% = function(%si%)
+  if not __XS_ANTIDEBUG__ then return end
+  %adMix% = (%adMix% + %CKS%[%si%]()) % 65521
+end
 if __XS_ANTIDEBUG__ then
-  if %adHook%() then %corrupt%() end
-  if %dbgLib% and %hookFn% then
-    local %nok%, %ninfo% = pcall(function() return %dbgLib%[%dname%(__XS_NM_GETINFO__)](%hookFn%, "S") end)
-    if %nok% and %ninfo% and %ninfo%.what ~= "C" then %corrupt%() end
-  end
+  for %sk% = 1, 4 do %adStep%(%sk%) end
 end
 
 -- Constants are decrypted on first use and cached, so a constant the
 -- program never touches is never decrypted at all.
 local %consts% = setmetatable({}, { __index = function(%ct%, %i2%)
+  %adStep%(%i2% % 4 + 1)
   local %dv% = %decode%(%raw%[%i2%])
   local %tg% = %dv%:byte(1)
   local %val%
