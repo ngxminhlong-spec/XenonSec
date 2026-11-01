@@ -218,7 +218,7 @@ local function obfuscateOnce(source, chunkname, opts)
     o = resolveShared("stdO"), j = resolveShared("stdJ"),
     char = resolveShared("char"), byte = resolveShared("byte"), concat = resolveShared("concat"),
     base = resolveShared("base"), sm = resolveShared("bsm"), f = resolveShared("bf"),
-    ok = resolveShared("bok"), r = resolveShared("br"),
+    ok = resolveShared("bok"), r = resolveShared("br"), pc = resolveShared("bpc"),
   }
   header = rewriteStd(header, stdTab, stdList, stdIndex)
   header = header:gsub("__XS_VAULT__", vaultLit)
@@ -268,6 +268,7 @@ local function obfuscateOnce(source, chunkname, opts)
   header = header:gsub("__XS_ANTIDEBUG__", tostring(opts.antiDebug))
   header = header:gsub("__XS_WMIDX__", tostring(bundle.watermarkIdx))
   header = header:gsub("__XS_DECMAIN__", tostring(bundle.decMain))
+  header = header:gsub("__XS_GROOT__", function() return resolveShared("stdG") end)
   -- Built here, after resolveShared exists, so the corrupt() helper is
   -- emitted under its renamed identifier like everything else in the header.
   -- Live getters for the standard builtins (see %LIVE% in the header).

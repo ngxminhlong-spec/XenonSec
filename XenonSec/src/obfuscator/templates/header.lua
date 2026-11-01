@@ -373,7 +373,7 @@ if not %verify%() then %corrupt%() end
 --    builtins read live (so a host's replacement of print is seen), then
 --    to the `_G` snapshot of host globals.
 -- Either way the names are encrypted constants, never plaintext.
-local %base% = (getfenv and getfenv(0)) or _G
+local %base% = __XS_GROOT__
 local %LIVE% = { __XS_LIVE__ }
 local %priv% = {}
 local %NILH% = {}

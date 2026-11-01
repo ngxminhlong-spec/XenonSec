@@ -128,11 +128,11 @@ local function buildStdBlock(tabName, list, names, salt)
   -- reached through the string metatable, and string.char is the function that
   -- gives "AB" for (65, 66); string.byte gives 65, 66 for ("AB", 1, 2).
   lines[#lines + 1] = string.format(
-    'local %s, %s; do local %s = getmetatable("").__index for _, %s in pairs(%s) do if type(%s) == "function" then local %s, %s = pcall(%s, 65, 66) if %s and %s == "AB" then %s = %s end local %s, %s, %s = pcall(%s, "AB", 1, 2) if %s and %s == 65 and %s == 66 then %s = %s end end end end',
+    'local %s, %s; do local %s, %s = pcall, getmetatable("").__index for _, %s in pairs(%s) do if type(%s) == "function" then local %s, %s = %s(%s, 65, 66) if %s and %s == "AB" then %s = %s end local %s, %s, %s = %s(%s, "AB", 1, 2) if %s and %s == 65 and %s == 66 then %s = %s end end end end',
     names.byte, names.char,
-    names.sm, names.f, names.sm, names.f,
-    names.ok, names.r, names.f, names.ok, names.r, names.char, names.f,
-    names.ok, names.r, names.j, names.f, names.ok, names.r, names.j, names.byte, names.f)
+    names.pc, names.sm, names.f, names.sm, names.f,
+    names.ok, names.r, names.pc, names.f, names.ok, names.r, names.char, names.f,
+    names.ok, names.r, names.j, names.pc, names.f, names.ok, names.r, names.j, names.byte, names.f)
   -- Name decoder: builds the string byte by byte, so it needs no table library.
   lines[#lines + 1] = string.format(
     "local function %s(%s) local %s = \"\" for %s = 1, #%s do %s = %s .. %s((%s[%s] - %d) %% 256) end return %s end",
