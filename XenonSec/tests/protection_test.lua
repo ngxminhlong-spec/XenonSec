@@ -426,9 +426,26 @@ do
   -- enough to reach the hash-check placements. The checks use captured
   -- builtins, so the program still runs to completion.
   local src = "type = 5 local t = 0 for i = 1, 300000 do t = t + i end print(t)"
+  local realType = type
   local ok, err, _, output = run(src, { antiDebug = true })
+  type = realType -- the payload runs in this process; undo its rebinding
   check("global type rebound by the payload does not break the hash checks",
     ok and output == "45000150000", ("ok=%s output=%s err=%s"):format(tostring(ok), tostring(output), tostring(err)))
+end
+
+do
+  -- Default builds (antiDebug off) carry none of the anti-debug machinery: no
+  -- dump prefix, no hash table, no self-test modulus, no check placements.
+  local src = "local t = 0 for i = 1, 30000 do t = t + i end print(t)"
+  local plain = Obf.obfuscate(src, "t", {})
+  check("default build has no bytecode-hash prefix", not plain:find("\\027Lua", 1, true))
+  check("default build has no anti-debug state modulus", not plain:find("65521", 1, true))
+  -- The periodic integrity check has the same "if ... % n == r then" head, so
+  -- match the call shape that only anti-debug placements use.
+  local _, placements = plain:gsub("if [%w_%.]+%s*%%%s*%d+%s*==%s*%d+%s*then%s*[%w_]+%(%d+%)%s*end", "")
+  check("default build has no periodic check placements", placements == 0, "n=" .. placements)
+  local ad = Obf.obfuscate(src, "t", { antiDebug = true })
+  check("anti-debug build has the bytecode-hash prefix", ad:find("\\027Lua", 1, true) ~= nil)
 end
 
 print()

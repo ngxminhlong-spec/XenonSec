@@ -135,7 +135,9 @@ local function buildBundle(mod, opts)
   --       same signal as any other tamper -- not a separate mechanism.
   local watermarkIdx = addConst(mod, "Protected by XenonSec")
   local antiPre = {}
-  for _, nm in ipairs(ANTI_NAMES) do antiPre[nm] = addConst(mod, nm) end
+  if opts.antiDebug then
+    for _, nm in ipairs(ANTI_NAMES) do antiPre[nm] = addConst(mod, nm) end
+  end
   -- The handler self-test needs a constant 3 to drive the BINK check.
   local threePre = addConst(mod, 3)
 

@@ -35,6 +35,7 @@ local buildStdBlock, encName, rewriteStd = _stdlib.buildStdBlock, _stdlib.encNam
 local minifyTemplateText, randomIdent, substitute = _util.minifyTemplateText, _util.randomIdent, _util.substitute
 local FOOTER_TEMPLATE = load("templates/footer")
 local HEADER_TEMPLATE = load("templates/header")
+local ANTIDEBUG_TEMPLATE = load("templates/antidebug")
 local VM_TEMPLATE = load("templates/vm")
 local CORE_BLOCKS = load("templates/core_handlers")
 local CORE_VARIANTS = load("templates/core_variants")
@@ -188,6 +189,14 @@ local function obfuscateOnce(source, chunkname, opts)
   local footerTpl = opts.minify and minifyTemplateText(FOOTER_TEMPLATE) or FOOTER_TEMPLATE
 
   local header = substitute(headerTpl, resolveShared)
+  -- Anti-debug machinery is emitted only for anti-debug builds.
+  if opts.antiDebug then
+    local adTpl = opts.minify and minifyTemplateText(ANTIDEBUG_TEMPLATE) or ANTIDEBUG_TEMPLATE
+    local adText = substitute(adTpl, resolveShared)
+    header = header:gsub("__XS_ADBLOCK__", function() return adText end)
+  else
+    header = header:gsub("__XS_ADBLOCK__", function() return "" end)
+  end
   -- Standard-library references: rewrite to indexes into one table that
   -- the header fills at startup (see rewriteStd / buildStdBlock).
   local stdTab = resolveShared("stdtab")
