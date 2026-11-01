@@ -348,6 +348,10 @@ end
 -- Captured at load, before any program code runs. The checks compare against
 -- these values, not against whatever the globals hold later.
 local %pcallC% = pcall
+-- Builtins the hash check uses, captured here so a program that rebinds a
+-- global (type, string, ...) cannot make the check throw. %byte% above is the
+-- captured string.byte.
+local %typeC% = type
 local %dbgLib% = nil
 local %hookFn% = nil
 local %infoFn% = nil
@@ -474,10 +478,12 @@ local %sdump% = string and string.dump
 local function %ckDump%(%f%)
   if not %sdump% then return nil end
   local %ok%, %s% = %pcallC%(%sdump%, %f%, true)
-  if not %ok% or type(%s%) ~= "string" then return nil end
-  if %s%:sub(1, #%DPFX%) ~= %DPFX% then return nil end
+  if not %ok% or %typeC%(%s%) ~= "string" then return nil end
+  for %j% = 1, #%DPFX% do
+    if %byte%(%s%, %j%) ~= %byte%(%DPFX%, %j%) then return nil end
+  end
   local %h% = 5381
-  for %j% = 1, #%s% do %h% = (%h% * 31 + %s%:byte(%j%)) % 2147483647 end
+  for %j% = 1, #%s% do %h% = (%h% * 31 + %byte%(%s%, %j%)) % 2147483647 end
   return %h%
 end
 

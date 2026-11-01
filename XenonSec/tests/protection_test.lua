@@ -421,5 +421,15 @@ do
     not okBad and nBad == 0, ("ok=%s captured=%d"):format(tostring(okBad), nBad))
 end
 
+do
+  -- The payload rebinds the global type to a non-function, then runs long
+  -- enough to reach the hash-check placements. The checks use captured
+  -- builtins, so the program still runs to completion.
+  local src = "type = 5 local t = 0 for i = 1, 300000 do t = t + i end print(t)"
+  local ok, err, _, output = run(src, { antiDebug = true })
+  check("global type rebound by the payload does not break the hash checks",
+    ok and output == "45000150000", ("ok=%s output=%s err=%s"):format(tostring(ok), tostring(output), tostring(err)))
+end
+
 print()
 print(pass .. " / " .. total .. " anti-tamper/anti-debug tests passed")
