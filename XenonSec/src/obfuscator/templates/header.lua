@@ -237,11 +237,17 @@ local %mkLzd%
 -- against the stored hash (field i) before anything can run them.
 local function %dproto%(%pr%)
   local %pk% = %pkey%(%buildKey%(), %pr%.n)
-  local %rawz% = %decodeK%(%pr%.b, %pk%)
+  -- Runtime-decoder protos are stored as bytes and without compression: they
+  -- are what decodes and decompresses everything else. Other protos are
+  -- base85 text (decoded by the runtime decoder unit) over the cipher blob.
+  local %rawz%
+  if %pr%.w then
+    %rawz% = %decodeK%(%pr%.b, %pk%)
+  else
+    %rawz% = %decodeK%(%mkLzd%()[2](%pr%.b, %pr%.bl), %pk%)
+  end
   local %raw% = %rawz%
-  -- Runtime-decoder protos are stored without compression: they are what
-  -- decompresses everything else.
-  if not %pr%.w then %raw% = %mkLzd%()(%rawz%, %pr%.r) end
+  if not %pr%.w then %raw% = %mkLzd%()[1](%rawz%, %pr%.r) end
   local %code% = {}
   local %dh% = 5381
   local function %hm%(%n%) %dh% = (%dh% * 31 + (%n% or 0)) % 2147483647 end

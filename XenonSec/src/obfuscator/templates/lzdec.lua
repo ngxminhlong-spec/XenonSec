@@ -8,7 +8,8 @@
 --------------------------------------------------------------------
 
 return [===[
-return function(z, maxn)
+return {
+function(z, maxn)
   local D = __LZ_D__
   local n = string.byte(z, 1) * 16777216 + string.byte(z, 2) * 65536 + string.byte(z, 3) * 256 + string.byte(z, 4)
   if n > maxn then return "" end
@@ -110,5 +111,33 @@ return function(z, maxn)
   local parts = {}
   for i = 1, cnt do parts[i] = string.char(out[i]) end
   return table.concat(parts)
+end,
+
+-- Base85 decoder for the proto blobs (mirrors encodeB85 in bundle.lua).
+-- Returns the first n bytes of the decoded text.
+function(s, n)
+  local idx = {}
+  local k = 0
+  for c = 35, 120 do
+    if c ~= 92 then
+      idx[c] = k
+      k = k + 1
+    end
+  end
+  local out = {}
+  local m = 0
+  local groups = math.floor(#s / 5)
+  for g = 0, groups - 1 do
+    local base = g * 5
+    local v = 0
+    for q = 1, 5 do v = v * 85 + idx[string.byte(s, base + q)] end
+    out[m + 1] = string.char(math.floor(v / 16777216) % 256)
+    out[m + 2] = string.char(math.floor(v / 65536) % 256)
+    out[m + 3] = string.char(math.floor(v / 256) % 256)
+    out[m + 4] = string.char(v % 256)
+    m = m + 4
+  end
+  return string.sub(table.concat(out), 1, n)
 end
+}
 ]===]

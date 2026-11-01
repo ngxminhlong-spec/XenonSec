@@ -9,6 +9,28 @@ local _crypto = load("crypto")
 local cipherEncrypt = _crypto.cipherEncrypt
 local CIPHER = _crypto.CIPHER
 local lzmaCompress = load("lzma").compress
+
+-- Base85 for the proto blobs. The alphabet is the printable ASCII range
+-- 35..120 without the backslash (92), so the text needs no Lua escapes. The
+-- runtime decoder (templates/lzdec.lua) uses the same order. Input is padded
+-- to whole 4-byte groups, and the caller keeps the exact length.
+local B85_CODES = {}
+for c = 35, 120 do
+  if c ~= 92 then B85_CODES[#B85_CODES + 1] = c end
+end
+local function encodeB85(s)
+  local pad = (4 - #s % 4) % 4
+  s = s .. string.rep("\0", pad)
+  local out = {}
+  for i = 1, #s, 4 do
+    local v = s:byte(i) * 16777216 + s:byte(i + 1) * 65536 + s:byte(i + 2) * 256 + s:byte(i + 3)
+    for q = 4, 0, -1 do
+      local d = math.floor(v / 85 ^ q) % 85
+      out[#out + 1] = string.char(B85_CODES[d + 1])
+    end
+  end
+  return table.concat(out)
+end
 local _opcodes = load("opcodes")
 local BINOP_SYMBOLS, OPCODES, UNOP_SYMBOLS, constField = _opcodes.BINOP_SYMBOLS, _opcodes.OPCODES, _opcodes.UNOP_SYMBOLS, _opcodes.constField
 local _util = load("util")
@@ -423,13 +445,15 @@ local function buildBundle(mod, opts)
     local body = table.concat(raw)
     if rawF == 0 then body = lzmaCompress(body, mod.lzD) end
     local blob = cipherEncrypt(body, deriveProtoKey(nonce))
+    -- Runtime-decoder protos are stored as bytes; the rest as base85 text.
+    local stored = (rawF == 1) and blob or encodeB85(blob)
 
     -- Integrity: the nonce and every ciphertext byte are covered, in the same
     -- order the runtime's %verify% and %vp% use.
     checksum = mixChecksum(checksum, nonce)
     psum = mixChecksum(psum, nonce)
-    for i = 1, #blob do
-      local bv = blob:byte(i)
+    for i = 1, #stored do
+      local bv = stored:byte(i)
       checksum = mixChecksum(checksum, bv)
       psum = mixChecksum(psum, bv)
     end
@@ -444,11 +468,11 @@ local function buildBundle(mod, opts)
     end
     checksum = mixChecksum(checksum, psum)
     protoLits[#protoLits + 1] = string.format(
-      "{p={%s},v=%s,w=%s,k=%d,n=%d,i=%d,r=%d,b=%s}",
+      "{p={%s},v=%s,w=%s,k=%d,n=%d,i=%d,r=%d,bl=%d,b=%s}",
       table.concat(paramParts, ","),
       proto.hasVararg and "true" or "false",
       rawF == 1 and "true" or "false",
-      psum, nonce, ih, #table.concat(raw), luaBytes(blob)
+      psum, nonce, ih, #table.concat(raw), #blob, luaBytes(stored)
     )
   end
   checksum = keyedFinal(checksum, key)
