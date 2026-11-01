@@ -39,6 +39,7 @@ local function genDecoyHandlers(ensureName, count, probeExpr, freeKey)
   local ip, regsF = ensureName("ip"), ensureName("regs")
   local x2, x3, x4 = ensureName("x2"), ensureName("x3"), ensureName("x4")
   local BINOPS, consts = ensureName("BINOPS"), ensureName("consts")
+  local cgetN, stF = ensureName("cget"), ensureName("st")
 
   -- Plausible bodies over the real frame fields. They are never reachable:
   -- their keys come from the same pool as the real opcodes but are never
@@ -51,7 +52,7 @@ local function genDecoyHandlers(ensureName, count, probeExpr, freeKey)
       return string.format("local %s = %s.%s[%s.%s]; %s.%s[%s.%s] = %s", dv, F, regsF, F, x2, F, regsF, F, x2, dv)
     end,
     function()
-      return string.format("local r = %s.%s; r[%s.%s] = %s[%s.%s]", F, regsF, F, x2, consts, F, x4)
+      return string.format("local r = %s.%s; r[%s.%s] = %s(%s, %s.%s, %s.%s)", F, regsF, F, x2, cgetN, consts, F, x4, F, stF)
     end,
     function()
       local tv = ensureName("tv" .. tostring(math.random(1, 99999)))
@@ -83,6 +84,7 @@ local function genOpHandlers(ensureName, probeExpr, OPNUM, BINNUM, UNNUM)
   local regsF, ipF = ensureName("regs"), ensureName("ip")
   local x2, x3, x4 = ensureName("x2"), ensureName("x3"), ensureName("x4")
   local BINOPS, UNOPS, consts = ensureName("BINOPS"), ensureName("UNOPS"), ensureName("consts")
+  local cgetN, stF = ensureName("cget"), ensureName("st")
   local lines = {}
   local function handler(opnum, body)
     local gate = genOpaquePredicate(probeExpr(), 3)
@@ -96,8 +98,8 @@ local function genOpHandlers(ensureName, probeExpr, OPNUM, BINNUM, UNNUM)
       "local r = %s.%s; r[%s.%s] = %s[%d](r[%s.%s], r[%s.%s]);",
       F, regsF, F, x2, BINOPS, num, F, x3, F, x4))
     handler(OPNUM["BINK" .. k], string.format(
-      "local r = %s.%s; r[%s.%s] = %s[%d](r[%s.%s], %s[%s.%s]);",
-      F, regsF, F, x2, BINOPS, num, F, x3, consts, F, x4))
+      "local r = %s.%s; r[%s.%s] = %s[%d](r[%s.%s], %s(%s, %s.%s, %s.%s));",
+      F, regsF, F, x2, BINOPS, num, F, x3, cgetN, consts, F, x4, F, stF))
   end
   for k, sym in ipairs(UNOP_SYMBOLS) do
     local num = UNNUM[sym]

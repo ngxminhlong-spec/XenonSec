@@ -357,7 +357,9 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       if KV and KV.flush then
         flush = " if " .. probeExpr() .. " % " .. tostring(KV.flushEvery or 65536) .. " == 0 then for " ..
                 ensureName("fk") .. " in pairs(" .. ensureName("consts") .. ") do rawset(" ..
-                ensureName("consts") .. ", " .. ensureName("fk") .. ", nil) end end"
+                ensureName("consts") .. ", " .. ensureName("fk") .. ", nil) end " ..
+                "for " .. ensureName("fk") .. " in pairs(" .. ensureName("scache") .. ") do rawset(" ..
+                ensureName("scache") .. ", " .. ensureName("fk") .. ", nil) end end"
       end
       return verify .. flush
     end

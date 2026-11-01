@@ -427,11 +427,26 @@ local %consts% = setmetatable({}, { __index = function(%ct%, %i2%)
   return %val%
 end })
 
+-- Per-site constants: entries above the static count are read by one
+-- instruction each, and their key comes from the VM state at that instruction.
+-- A value decodes only when the program reaches the instruction that reads it.
+-- Decoded values live in %sc%, which the engine's periodic flush clears.
+local %sc% = {}
+local function %cgetF%(%ct%, %ci%, %st%)
+  if %ci% <= __XS_NSTATIC__ then return %ct%[%ci%] end
+  local %v% = %sc%[%ci%]
+  if %v% == nil then
+    %v% = %constval%(%decodeK%(%mkLzd%()[2](%raw%[%ci%], %clens%[%ci%]), %pkey%(%buildKey%(), %st%)))
+    %sc%[%ci%] = %v%
+  end
+  return %v%
+end
+
 -- Builds the runtime decoder by running its unit on this same engine. Its
 -- protos are raw, so building it never recurses into this function.
 %mkLzd% = function()
   if not %lzdFn% then
-    %lzdFn% = %ENG%({ %escDec%, %protos%, __XS_DECMAIN__, %adStep%, %GETG%, %SETG%, %dproto%, %poison% })
+    %lzdFn% = %ENG%({ %escDec%, %protos%, __XS_DECMAIN__, %adStep%, %GETG%, %SETG%, %dproto%, %poison%, %cgetF%, %sc% })
   end
   return %lzdFn%
 end

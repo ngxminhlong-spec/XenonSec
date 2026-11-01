@@ -9,7 +9,7 @@ return {
 [==[
   %H%[%OP_LOADK%] = function(%F%%ANN_F%, %ins%%ANN_I%)
     if not (%OPQ_LOADK%) then error() end
-    %F%.%regs%[%F%.%x2%] = %consts%[%F%.%x3%]
+    %F%.%regs%[%F%.%x2%] = %cget%(%consts%, %F%.%x3%, %F%.%st%)
     %F%.%ip% = %F%.%ip% + 1
   end
 ]==],
@@ -46,7 +46,7 @@ return {
 [==[
   %H%[%OP_GETVAR%] = function(%F%%ANN_F%, %ins%%ANN_I%)
     if not (%OPQ_GETVAR%) then error() end
-    local %nm% = %consts%[%F%.%x3%]
+    local %nm% = %cget%(%consts%, %F%.%x3%, %F%.%st%)
     local %sc% = %lookup%(%F%, %nm%)
     local %r% = %F%.%regs%
     if %sc% then
@@ -61,7 +61,7 @@ return {
 [==[
   %H%[%OP_SETVAR%] = function(%F%%ANN_F%, %ins%%ANN_I%)
     if not (%OPQ_SETVAR%) then error() end
-    local %nm% = %consts%[%F%.%x3%]
+    local %nm% = %cget%(%consts%, %F%.%x3%, %F%.%st%)
     local %v% = %F%.%regs%[%F%.%x2%]
     local %sc% = %lookup%(%F%, %nm%)
     if %sc% then
@@ -76,7 +76,7 @@ return {
   %H%[%OP_DECLCELL%] = function(%F%%ANN_F%, %ins%%ANN_I%)
     if not (%OPQ_DECLCELL%) then error() end
     local %v% = %F%.%regs%[%F%.%x2%]
-    %F%.%scope%.%varsField%[%consts%[%F%.%x3%]] = (%v% == nil) and %NILV% or %v%
+    %F%.%scope%.%varsField%[%cget%(%consts%, %F%.%x3%, %F%.%st%)] = (%v% == nil) and %NILV% or %v%
     %F%.%ip% = %F%.%ip% + 1
   end
 ]==],
@@ -107,7 +107,7 @@ return {
   %H%[%OP_GETIDXK%] = function(%F%%ANN_F%, %ins%%ANN_I%)
     if not (%OPQ_GETIDXK%) then error() end
     local %r% = %F%.%regs%
-    %r%[%F%.%x2%] = %r%[%F%.%x3%][%consts%[%F%.%x4%]]
+    %r%[%F%.%x2%] = %r%[%F%.%x3%][%cget%(%consts%, %F%.%x4%, %F%.%st%)]
     %F%.%ip% = %F%.%ip% + 1
   end
 ]==],
@@ -115,7 +115,7 @@ return {
   %H%[%OP_SETIDXK%] = function(%F%%ANN_F%, %ins%%ANN_I%)
     if not (%OPQ_SETIDXK%) then error() end
     local %r% = %F%.%regs%
-    %r%[%F%.%x2%][%consts%[%F%.%x3%]] = %r%[%F%.%x4%]
+    %r%[%F%.%x2%][%cget%(%consts%, %F%.%x3%, %F%.%st%)] = %r%[%F%.%x4%]
     %F%.%ip% = %F%.%ip% + 1
   end
 ]==],
@@ -124,7 +124,7 @@ return {
     if not (%OPQ_SETLISTM%) then error() end
     local %r% = %F%.%regs%
     local %t% = %r%[%F%.%x2%]
-    local %off% = %consts%[%F%.%x4%]
+    local %off% = %cget%(%consts%, %F%.%x4%, %F%.%st%)
     for %j% = 1, %F%.%top% do %t%[%off% + %j%] = %r%[%F%.%x3% + %j% - 1] end
     %F%.%ip% = %F%.%ip% + 1
   end
@@ -137,7 +137,7 @@ return {
     local %r% = %F%.%regs%
     local %o% = %r%[%F%.%x3%]
     %r%[%F%.%x2% + 1] = %o%
-    %r%[%F%.%x2%] = %o%[%consts%[%F%.%x4%]]
+    %r%[%F%.%x2%] = %o%[%cget%(%consts%, %F%.%x4%, %F%.%st%)]
     %F%.%ip% = %F%.%ip% + 1
   end
 ]==],
@@ -314,7 +314,7 @@ return {
 [==[
   %H%[%OP_JUNK%] = function(%F%%ANN_F%, %ins%%ANN_I%)
     if not (%OPQ_JUNK%) then error() end
-    %F%.%regs%[%F%.%x2%] = %consts%[%F%.%x3%]
+    %F%.%regs%[%F%.%x2%] = %cget%(%consts%, %F%.%x3%, %F%.%st%)
     %F%.%ip% = %F%.%ip% + 1
   end
 ]==],

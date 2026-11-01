@@ -19,13 +19,13 @@ OP_LOADK = {
   %H%[%OP_LOADK%] = function(%F%%ANN_F%, %ins%%ANN_I%)
     if not (%OPQ_LOADK%) then error() end
     %F%.%ip% = %F%.%ip% + 1
-    %F%.%regs%[%F%.%x2%] = %consts%[%F%.%x3%]
+    %F%.%regs%[%F%.%x2%] = %cget%(%consts%, %F%.%x3%, %F%.%st%)
   end
 ]==],
 [==[
   %H%[%OP_LOADK%] = function(%F%%ANN_F%, %ins%%ANN_I%)
     if not (%OPQ_LOADK%) then error() end
-    local %r%, %k% = %F%.%regs%, %consts%[%F%.%x3%]
+    local %r%, %k% = %F%.%regs%, %cget%(%consts%, %F%.%x3%, %F%.%st%)
     %r%[%F%.%x2%] = %k%
     %F%.%ip% = %F%.%ip% + 1
   end
@@ -98,7 +98,7 @@ OP_GETIDXK = {
     if not (%OPQ_GETIDXK%) then error() end
     local %r% = %F%.%regs%
     local %o% = %r%[%F%.%x3%]
-    %r%[%F%.%x2%] = %o%[%consts%[%F%.%x4%]]
+    %r%[%F%.%x2%] = %o%[%cget%(%consts%, %F%.%x4%, %F%.%st%)]
     %F%.%ip% = %F%.%ip% + 1
   end
 ]==],
@@ -109,7 +109,7 @@ OP_SETIDXK = {
     if not (%OPQ_SETIDXK%) then error() end
     local %r% = %F%.%regs%
     local %o% = %r%[%F%.%x2%]
-    %o%[%consts%[%F%.%x3%]] = %r%[%F%.%x4%]
+    %o%[%cget%(%consts%, %F%.%x3%, %F%.%st%)] = %r%[%F%.%x4%]
     %F%.%ip% = %F%.%ip% + 1
   end
 ]==],

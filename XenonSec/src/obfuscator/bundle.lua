@@ -225,6 +225,17 @@ local function buildBundle(mod, opts)
   for nm, idx in pairs(antiPre) do antiIdx[nm] = perm[idx] end
   local threeIdx = perm[threePre]
 
+  local MOD = 1048573
+  local saltM1 = math.random(2, MOD - 2)
+  local saltM2 = math.random(2, MOD - 2)
+  -- Decode state: each field's mask also depends on a running state value.
+  -- The state advances from every instruction's opcode and is reset by jumps
+  -- and returns. The runtime dispatcher mirrors these constants exactly.
+  local saltM3 = math.random(2, MOD - 2)
+  local stepA = math.random(2, MOD - 2)
+  local stepB = math.random(2, MOD - 2)
+  local stepC = math.random(0, MOD - 1)
+
   -- Constants stored in escape form (decodable with the key alone). These are
   -- the ones the runtime decoder unit reads (so it can start), plus the ones
   -- read at load time: the watermark, the handler self-test constant, and the
@@ -325,6 +336,38 @@ local function buildBundle(mod, opts)
     if math.type then return math.type(x) == "integer" end
     return x == math.floor(x) and x > -2^53 and x < 2^53
   end
+  -- Per-site constants. Every constant read in a user proto gets its own pool
+  -- entry, keyed by the VM state at that instruction: the state the handler
+  -- sees, after the instruction's own update. The decoder unit's reads stay
+  -- static (it has to run before per-site entries can be decoded).
+  local nStatic = #shuffledConsts
+  local siteState = {}
+  local SITE_RESET = { JMP = true, JF = true, JT = true, JNIL = true, RET = true, RETM = true }
+  for pi, proto in ipairs(mod.protos) do
+    if not (pi >= (mod.rawFirst or 1) and pi <= (mod.rawLast or 0)) then
+      local cur = 0
+      for _, instr in ipairs(proto.code) do
+        if SITE_RESET[instr.op] then cur = 0 else cur = (cur * stepA + OPNUM[instr.op] * stepB + stepC) % MOD end
+        local cf = constField(instr.op)
+        if cf then
+          shuffledConsts[#shuffledConsts + 1] = shuffledConsts[instr[cf]]
+          siteState[#shuffledConsts] = cur
+          instr[cf] = #shuffledConsts
+        end
+      end
+    end
+  end
+
+  local function deriveProtoKey(nonce)
+    local s = (CIPHER.basis + nonce) % 16777216
+    local out = {}
+    for i = 1, #key do
+      s = (s * CIPHER.mult + CIPHER.add) % 16777216
+      out[i] = xor8(key[i], math.floor(s / 65536) % 256)
+    end
+    return out
+  end
+
   for i, v in ipairs(shuffledConsts) do
     local tagged
     if type(v) == "number" then
@@ -346,23 +389,13 @@ local function buildBundle(mod, opts)
     else
       tagged = string.char(tagS) .. v
     end
-    cipherConsts[i] = cipherEncrypt(tagged, key)
+    cipherConsts[i] = cipherEncrypt(tagged, siteState[i] and deriveProtoKey(siteState[i]) or key)
   end
 
   -- 4.5. Opcode encoding. Every stored opcode is (key + salt(ip)) mod MOD,
   --       where salt(ip) = (ip * saltA + saltB) mod MOD depends on the
   --       instruction's position. Equal opcodes therefore look different
   --       on disk, and the runtime undoes it with the same constants.
-  local MOD = 1048573
-  local saltM1 = math.random(2, MOD - 2)
-  local saltM2 = math.random(2, MOD - 2)
-  -- Decode state: each field's mask also depends on a running state value.
-  -- The state advances from every instruction's opcode and is reset by jumps
-  -- and returns. The runtime dispatcher mirrors these constants exactly.
-  local saltM3 = math.random(2, MOD - 2)
-  local stepA = math.random(2, MOD - 2)
-  local stepB = math.random(2, MOD - 2)
-  local stepC = math.random(0, MOD - 1)
   -- The mask for one field depends on that instruction's own random seed
   -- and the field's slot (1 = opcode, 2..4 = operands). There is no
   -- position-only pattern to recover.
@@ -406,15 +439,6 @@ local function buildBundle(mod, opts)
   -- nonce, and the proto stores only that ciphertext. The engine decrypts a
   -- proto the first time it is called (%dproto% in the header), so protos
   -- that never run are never decrypted.
-  local function deriveProtoKey(nonce)
-    local s = (CIPHER.basis + nonce) % 16777216
-    local out = {}
-    for i = 1, #key do
-      s = (s * CIPHER.mult + CIPHER.add) % 16777216
-      out[i] = xor8(key[i], math.floor(s / 65536) % 256)
-    end
-    return out
-  end
 
   local function packInstr(eop, ea, eb, ec, seed)
     local parts = {}
@@ -518,6 +542,7 @@ local function buildBundle(mod, opts)
 
   return {
     cipherConsts = cipherConsts,
+    nStatic = nStatic,
     cipherText = cipherText,
     escEntries = escEntries,
     cipherLens = cipherLens,

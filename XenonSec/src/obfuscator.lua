@@ -269,6 +269,7 @@ local function obfuscateOnce(source, chunkname, opts)
   header = header:gsub("__XS_WMIDX__", tostring(bundle.watermarkIdx))
   header = header:gsub("__XS_DECMAIN__", tostring(bundle.decMain))
   header = header:gsub("__XS_GROOT__", function() return resolveShared("stdG") end)
+  header = header:gsub("__XS_NSTATIC__", tostring(bundle.nStatic))
   -- Built here, after resolveShared exists, so the corrupt() helper is
   -- emitted under its renamed identifier like everything else in the header.
   -- Live getters for the standard builtins (see %LIVE% in the header).
