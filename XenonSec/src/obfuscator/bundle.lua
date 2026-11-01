@@ -18,6 +18,12 @@ local B85_CODES = {}
 for c = 35, 120 do
   if c ~= 92 then B85_CODES[#B85_CODES + 1] = c end
 end
+-- Lua string literal for arbitrary bytes, with bytes >= 128 as decimal escapes.
+local function escapeLiteral(str)
+  return (string.format("%q", str):gsub("[\128-\255]", function(ch)
+    return string.format("\\%03d", ch:byte())
+  end))
+end
 local function encodeB85(s)
   local pad = (4 - #s % 4) % 4
   s = s .. string.rep("\0", pad)
@@ -219,6 +225,25 @@ local function buildBundle(mod, opts)
   for nm, idx in pairs(antiPre) do antiIdx[nm] = perm[idx] end
   local threeIdx = perm[threePre]
 
+  -- Constants stored in escape form (decodable with the key alone). These are
+  -- the ones the runtime decoder unit reads (so it can start), plus the ones
+  -- read at load time: the watermark, the handler self-test constant, and the
+  -- anti-debug names. Every other constant is base85, decoded by the VM.
+  local escSet = {}
+  escSet[watermarkIdx] = true
+  escSet[threeIdx] = true
+  for _, idx in pairs(antiIdx) do escSet[idx] = true end
+  for pi = mod.rawFirst or 1, mod.rawLast or 0 do
+    local proto = mod.protos[pi]
+    for _, instr in ipairs(proto.code) do
+      local cf = constField(instr.op)
+      if cf then escSet[instr[cf]] = true end
+    end
+    for _, pair in ipairs(proto.paramIdx) do
+      if pair[1] == 1 then escSet[pair[2]] = true end
+    end
+  end
+
 
   -- 3. Randomize opcode numbers for this build. Binary/unary operator
   --    symbols get their OWN randomized integer IDs too, so BINOP/UNOP
@@ -359,14 +384,20 @@ local function buildBundle(mod, opts)
   -- The constant pool is stored as base85 text (see the header's constant
   -- decoder); each constant keeps its exact length, since the padding is
   -- not part of the ciphertext.
-  local cipherText, cipherLens = {}, {}
+  local cipherText, cipherLens, escEntries = {}, {}, {}
   for i, c in ipairs(cipherConsts) do
-    cipherText[i] = encodeB85(c)
+    if escSet[i] then
+      cipherText[i] = ""
+      escEntries[#escEntries + 1] = string.format("[%d]=%s", i, escapeLiteral(c))
+    else
+      cipherText[i] = encodeB85(c)
+    end
     cipherLens[i] = #c
   end
   local checksum = 5381
-  for _, t in ipairs(cipherText) do
-    for i = 1, #t do checksum = mixChecksum(checksum, t:byte(i)) end
+  for i = 1, #cipherConsts do
+    local s = escSet[i] and cipherConsts[i] or cipherText[i]
+    for j = 1, #s do checksum = mixChecksum(checksum, s:byte(j)) end
   end
 
   -- Per-proto encryption. Each proto's instructions are packed into 15 bytes
@@ -488,6 +519,7 @@ local function buildBundle(mod, opts)
   return {
     cipherConsts = cipherConsts,
     cipherText = cipherText,
+    escEntries = escEntries,
     cipherLens = cipherLens,
     liveNames = liveNames,
     saltM1 = saltM1,
