@@ -95,6 +95,19 @@ function Passes.flatten(mod, rng, fakeScale)
 		end
 		local nb = #blocks
 
+		-- Decoy bodies are copies of this proto's own instructions, with block
+		-- sizes taken from the real blocks, so dead code has the live opcode mix
+		-- and size profile. Jumps, returns and multi-value producers are left out:
+		-- a copied one would be a control edge or a window the decoy never meant.
+		local pool, lens = {}, {}
+		for _, blk in ipairs(blocks) do lens[#lens + 1] = math.min(blk.e - blk.s + 1, 12) end
+		for i = 1, n do
+			local ins = code[i]
+			if not JUMP_FIELD[ins.op] and ins.op ~= "RET" and ins.op ~= "RETM" and not isMultiProducer(ins) then
+				pool[#pool + 1] = ins
+			end
+		end
+
 		-- Layout: entry first, the rest shuffled.
 		local layout = { 1 }
 		local rest = {}
@@ -111,11 +124,10 @@ function Passes.flatten(mod, rng, fakeScale)
 		local fakes = {}
 		for f = 1, fakeCount do
 			local body = {}
-			for _ = 1, rng(1, 3) do
-				local tpl = DECOY_TEMPLATES[rng(1, #DECOY_TEMPLATES)]
-				local copy = {}
-				for kk, v in pairs(tpl) do copy[kk] = v end
-				body[#body + 1] = copy
+			local len = #lens > 0 and lens[rng(1, #lens)] or rng(1, 3)
+			for _ = 1, len do
+				local src = #pool > 0 and pool[rng(1, #pool)] or DECOY_TEMPLATES[rng(1, #DECOY_TEMPLATES)]
+				body[#body + 1] = { op = src.op, a = src.a, b = src.b, c = src.c }
 			end
 			local target
 			if f > 1 and rng(1, 2) == 1 then
@@ -164,7 +176,7 @@ function Passes.flatten(mod, rng, fakeScale)
 			else
 				newStart["f" .. item.fake] = #out + 1
 				local fk = fakes[item.fake]
-				for _, copy in ipairs(fk.body) do out[#out + 1] = copy end
+				for _, copy in ipairs(fk.body) do copy.decoy = true; out[#out + 1] = copy end
 				out[#out + 1] = { op = "JMP", a = 0 }
 				pending[#out] = { field = "a", block = fk.jumpTo }
 			end
