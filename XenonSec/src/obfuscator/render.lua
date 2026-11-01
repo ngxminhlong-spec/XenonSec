@@ -193,11 +193,22 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
     if tok == "OPALIASES" then return renderOpAliases() end
     if tok == "ADCHECK" then
       if not antiDebug then return "" end
-      -- Every 2048 dispatched instructions, re-probe for an attached hook.
-      -- Cheap (one modulo + one gethook call), and it catches debuggers
-      -- attached AFTER startup, which the one-shot check alone never sees.
-      return "if " .. probeExpr() .. " % 2048 == 0 and " ..
-             ensureName("adHook") .. "() then " .. ensureName("brick") .. "() end"
+      -- Three anti-debug checks in the dispatch loop, each at its own random
+      -- period and residue of the step counter, so the points where the checks
+      -- run differ from build to build. Each one calls adStep with a random
+      -- check index (see the anti-debug block in the header).
+      local step = ensureName("adStep")
+      local out = {}
+      for _ = 1, 3 do
+        local period = math.random(257, 1499)
+        local residue = math.random(0, period - 1)
+        -- Indexes 1-5 are live checks and the self-test; 11-14 are code hashes.
+        local index = math.random(1, 9)
+        if index > 5 then index = index + 5 end
+        out[#out + 1] = string.format("if %s %% %d == %d then %s(%d) end",
+          probeExpr(), period, residue, step, index)
+      end
+      return table.concat(out, " ")
     end
     if tok:sub(1, 2) == "N_" then
       local opname = tok:sub(3)

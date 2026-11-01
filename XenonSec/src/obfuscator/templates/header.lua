@@ -34,6 +34,11 @@ local %kmap% = { __XS_KMAP__ }
 local %sm1%, %sm2% = __XS_SM1__, __XS_SM2__
 local %vsum% = __XS_VSUM__
 local %kbad% = false
+-- Anti-debug state. %adMix% is the sum of the check results (0 while nothing
+-- is seen); %buildKey% folds it into the key. %adStep% is assigned in the
+-- anti-debug block below and called from several places in the code.
+local %adMix% = 0
+local %adStep% = function() end
 
 -- Tripwire: a weighted sum over the whole vault. Editing any byte changes it,
 -- which marks the key bad (see %corrupt%).
@@ -55,7 +60,14 @@ local function %buildKey%()
     local %c% = (%vault%[%pc%] - (%pc% * %sm1% + %sm2%) % 256) % 256
     %k%[%i%] = %bxor%(%bxor%(%a%, %b%), %c%)
   end
-  if %kbad% then for %i% = 1, %n% do %k%[%i%] = (%k%[%i%] + 97) % 256 end end
+  -- Clean builds: the state is zero and the key is unchanged. Otherwise the
+  -- shift is 1..255, and XOR with a nonzero value changes every byte, so no
+  -- state value (even a multiple of 256) can leave the key clean.
+  local %st% = %adMix% + (%kbad% and 1 or 0)
+  if %st% ~= 0 then
+    local %sh% = (%st% % 255) + 1
+    for %i% = 1, %n% do %k%[%i%] = %bxor%(%k%[%i%], %sh%) end
+  end
   return %k%
 end
 
@@ -214,6 +226,7 @@ end
 -- can run them; a mismatch leaves no usable opcodes.
 local function %dproto%(%pr%)
   local %pk% = %pkey%(%buildKey%(), %pr%.n)
+  if __XS_ANTIDEBUG__ then %adStep%(%pr%.n % 5 + 1) end
   local %plain% = %decodeK%(%pr%.b, %pk%)
   local %code% = {}
   local %dh% = 5381
@@ -335,44 +348,12 @@ local %SETG% = function(%k%, %v%)
   else %priv%[%k%] = (%v% == nil) and %NILH% or %v% end
 end
 
-local %dbgLib% = nil
-local %hookFn% = nil
-if __XS_ANTIDEBUG__ then
-  local %dok%, %dlib% = pcall(function() return %base%[%dname%(__XS_NM_DEBUG__)] end)
-  if %dok% and %dlib% then
-    local %gok%, %gfn% = pcall(function() return %dlib%[%dname%(__XS_NM_GETHOOK__)] end)
-    if %gok% and %gfn% then %dbgLib% = %dlib%; %hookFn% = %gfn% end
-  end
-end
-
--- Hook probe shared by the startup check and the periodic check that runs
--- inside the VM dispatch loop (see %ADCHECK%). It looks at the main hook and
--- at the hook of the running coroutine, since a debugger can attach to either.
-local %adHook% = function()
-  if not %hookFn% then return false end
-  local %hok%, %hfn% = pcall(%hookFn%)
-  if %hok% and %hfn% ~= nil then return true end
-  local %cok%, %co% = pcall(function() return %base%[%dname%(__XS_NM_COROUTINE__)][%dname%(__XS_NM_RUNNING__)]() end)
-  if %cok% and %co% then
-    local %ghok%, %ghf% = pcall(%hookFn%, %co%)
-    if %ghok% and %ghf% ~= nil then return true end
-  end
-  return false
-end
-
--- Native check: the hook probe must be the engine's own C function. Hook
--- tooling is typically installed by wrapping it in a Lua function.
-if __XS_ANTIDEBUG__ then
-  if %adHook%() then %corrupt%() end
-  if %dbgLib% and %hookFn% then
-    local %nok%, %ninfo% = pcall(function() return %dbgLib%[%dname%(__XS_NM_GETINFO__)](%hookFn%, "S") end)
-    if %nok% and %ninfo% and %ninfo%.what ~= "C" then %corrupt%() end
-  end
-end
+__XS_ADBLOCK__
 
 -- Constants are decrypted on first use and cached, so a constant the
 -- program never touches is never decrypted at all.
 local %consts% = setmetatable({}, { __index = function(%ct%, %i2%)
+  if __XS_ANTIDEBUG__ then %adStep%(%i2% % 5 + 1) end
   local %dv% = %decode%(%raw%[%i2%])
   local %tg% = %dv%:byte(1)
   local %val%

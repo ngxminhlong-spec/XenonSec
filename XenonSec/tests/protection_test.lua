@@ -287,5 +287,166 @@ do
   end
 end
 
+-- Keyed checks (see the anti-debug block in the header). Each case sets up one
+-- kind of debugger or tampering; detection means no program output and a
+-- failing run, because a fired check changes the decoded key.
+local function detectCase(name, src, setup, teardown)
+  local out = Obf.obfuscate(src, "t", { antiDebug = true })
+  local chunk = load(out, "t")
+  local captured = {}
+  local realPrint = print
+  print = function(...)
+    local p = {}
+    for i = 1, select("#", ...) do p[i] = tostring((select(i, ...))) end
+    captured[#captured + 1] = table.concat(p, "\t")
+  end
+  local ok, err = pcall(function()
+    local runner = setup(chunk)
+    if runner then return runner() end
+  end)
+  if teardown then teardown() end
+  print = realPrint
+  check(name, not ok and #captured == 0,
+    ("ok=%s captured=%d err=%s"):format(tostring(ok), #captured, tostring(err)))
+end
+
+do
+  -- Check 3: a wrapper around debug.gethook installed BEFORE load is caught
+  -- by the native check, because the captured hook probe is a Lua function.
+  local src = 'print("wrapped")'
+  local realGethook = debug.gethook
+  detectCase("a wrapped debug.gethook (installed before load) is detected", src,
+    function(chunk)
+      debug.gethook = function(...) return realGethook(...) end
+      local out = Obf.obfuscate(src, "t", { antiDebug = true })
+      return load(out, "t")
+    end,
+    function() debug.gethook = realGethook end)
+end
+
+do
+  -- Check 2: a hook on a running coroutine (not the main thread) is caught.
+  local src = 'print("in coroutine")'
+  detectCase("a debug hook on a coroutine is detected", src,
+    function(chunk)
+      local co = coroutine.create(chunk)
+      debug.sethook(co, function() end, "", 1000000)
+      return function() local okc, errc = coroutine.resume(co); if not okc then error(errc) end; return errc end
+    end,
+    nil)
+end
+
+do
+  -- Check 4: the debug library's fields are compared with what was captured at
+  -- load. Replacing one after load is caught by the periodic checks.
+  local src = "local n = 0 for i = 1, 50000 do n = n + i end print('done', n)"
+  local realGethook = debug.gethook
+  detectCase("a debug field replaced after load is detected (cross-check)", src,
+    function(chunk)
+      return function()
+        debug.gethook = function(...) return realGethook(...) end
+        local r = chunk()
+        return r
+      end
+    end,
+    function() debug.gethook = realGethook end)
+end
+
+do
+  -- Placement: the periodic checks are emitted at several points, and the
+  -- rest of the build is unchanged when anti-debug is off.
+  local src = "local t = 0 for i = 1, 3000 do t = t + i end print(t)"
+  -- Names are randomized, so match the shape: "if <counter> % <period> ==
+  -- <residue> then <name>(<index>) end" (the minifier may drop spaces).
+  local shape = "if [%w_%.]+%s*%%%s*%d+%s*==%s*%d+%s*then%s*[%w_]+%(%d+%)%s*end"
+  local out = Obf.obfuscate(src, "t", { antiDebug = true })
+  local _, calls = out:gsub(shape, "")
+  check("anti-debug build places several periodic checks", calls >= 3, "placements=" .. calls)
+  local plain = Obf.obfuscate(src, "t", {})
+  local _, plainCalls = plain:gsub(shape, "")
+  check("antiDebug off places no periodic checks", plainCalls == 0, "placements=" .. plainCalls)
+end
+
+do
+  -- Code check: editing one anti-debug check's code is caught even with no
+  -- debugger attached. The build hashes each check's stripped bytecode, and
+  -- the run compares it with the hash the build recorded (Lua 5.3 builds).
+  if _VERSION == "Lua 5.3" then
+    local src = 'print("clean run")'
+    local out = Obf.obfuscate(src, "t", { antiDebug = true })
+    local clean = load(out, "t")
+    local captured = {}
+    local realPrint = print
+    print = function(...) captured[#captured + 1] = table.concat({ ... }, "\t") end
+    local okClean = pcall(clean)
+    print = realPrint
+    check("unedited anti-debug build runs with no debugger", okClean and #captured == 1)
+    local tampered, n = out:gsub("return 53", "return 54", 1)
+    check("tamper target found in the output", n == 1, "n=" .. n)
+    local bad = load(tampered, "t")
+    captured = {}
+    print = function(...) captured[#captured + 1] = table.concat({ ... }, "\t") end
+    local okBad = pcall(bad)
+    print = realPrint
+    check("an edited check is caught with no debugger attached", not okBad and #captured == 0,
+      ("ok=%s captured=%d"):format(tostring(okBad), #captured))
+  end
+end
+
+do
+  -- Known-answer self-test: with the bytecode check switched off (the dump
+  -- prefix is changed so it never matches, as on another Lua version), an
+  -- edited check is still caught. This is the path that works on Lua 5.1 and
+  -- Luau.
+  local src = 'print("selftest run")'
+  local out = Obf.obfuscate(src, "t", { antiDebug = true })
+  local off, nOff = out:gsub("\\027Lua", "\\000Lua", 1)
+  check("bytecode-check prefix found in the output", nOff == 1, "n=" .. nOff)
+  local function runOut(text)
+    local chunk = load(text, "t")
+    local captured = {}
+    local realPrint = print
+    print = function(...) captured[#captured + 1] = table.concat({ ... }, "\t") end
+    local okRun = pcall(chunk)
+    print = realPrint
+    return okRun, #captured
+  end
+  local okClean, nClean = runOut(off)
+  check("bytecode check off: unedited build runs", okClean and nClean == 1,
+    ("ok=%s captured=%d"):format(tostring(okClean), nClean))
+  local tampered, nT = off:gsub("return 53", "return 0", 1)
+  check("bytecode check off: tamper target found", nT == 1, "n=" .. nT)
+  local okBad, nBad = runOut(tampered)
+  check("bytecode check off: an edited check is still caught by the self-test",
+    not okBad and nBad == 0, ("ok=%s captured=%d"):format(tostring(okBad), nBad))
+end
+
+do
+  -- The payload rebinds the global type to a non-function, then runs long
+  -- enough to reach the hash-check placements. The checks use captured
+  -- builtins, so the program still runs to completion.
+  local src = "type = 5 local t = 0 for i = 1, 300000 do t = t + i end print(t)"
+  local realType = type
+  local ok, err, _, output = run(src, { antiDebug = true })
+  type = realType -- the payload runs in this process; undo its rebinding
+  check("global type rebound by the payload does not break the hash checks",
+    ok and output == "45000150000", ("ok=%s output=%s err=%s"):format(tostring(ok), tostring(output), tostring(err)))
+end
+
+do
+  -- Default builds (antiDebug off) carry none of the anti-debug machinery: no
+  -- dump prefix, no hash table, no self-test modulus, no check placements.
+  local src = "local t = 0 for i = 1, 30000 do t = t + i end print(t)"
+  local plain = Obf.obfuscate(src, "t", {})
+  check("default build has no bytecode-hash prefix", not plain:find("\\027Lua", 1, true))
+  check("default build has no anti-debug state modulus", not plain:find("65521", 1, true))
+  -- The periodic integrity check has the same "if ... % n == r then" head, so
+  -- match the call shape that only anti-debug placements use.
+  local _, placements = plain:gsub("if [%w_%.]+%s*%%%s*%d+%s*==%s*%d+%s*then%s*[%w_]+%(%d+%)%s*end", "")
+  check("default build has no periodic check placements", placements == 0, "n=" .. placements)
+  local ad = Obf.obfuscate(src, "t", { antiDebug = true })
+  check("anti-debug build has the bytecode-hash prefix", ad:find("\\027Lua", 1, true) ~= nil)
+end
+
 print()
 print(pass .. " / " .. total .. " anti-tamper/anti-debug tests passed")
