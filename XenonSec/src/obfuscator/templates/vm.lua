@@ -103,8 +103,8 @@ local function %run%(%mod%, ...)
 
   -- Field decoder: stored = (value + mask(seed, slot)) mod MOD. The
   -- dispatcher inlines the same arithmetic; this copy serves the verifier.
-  local function %dec%(%v%, %sd%, %slot%)
-    return (%v% - (%sd% * %K_M1% + %slot% * %K_M2%) % %K_MOD%) % %K_MOD%
+  local function %dec%(%v%, %sd%, %slot%, %st%)
+    return (%v% - (%sd% * %K_M1% + %st% * %K_M3% + %slot% * %K_M2%) % %K_MOD%) % %K_MOD%
   end
 
   -- Per-proto integrity: recompute one proto's checksum and compare it with
@@ -184,7 +184,7 @@ local function %run%(%mod%, ...)
       %F%.%x2% = (%ins%[2] - (%mk% + 2 * %K_M2%) % %K_MOD%) % %K_MOD%
       %F%.%x3% = (%ins%[3] - (%mk% + 3 * %K_M2%) % %K_MOD%) % %K_MOD%
       %F%.%x4% = (%ins%[4] - (%mk% + 4 * %K_M2%) % %K_MOD%) % %K_MOD%
-      %F%.%st% = (%F%.%st% * %K_SA% + %key% * %K_SB% + %K_SC%) % %K_MOD%
+      %F%.%st% = (%F%.%st% * %K_SA% + (%CANON%[%key%] or %key%) * %K_SB% + %K_SC%) % %K_MOD%
       %F%.%pr% = (%F%.%pr% + 1) % 65536
       %PERIODIC%
       %ADCHECK%

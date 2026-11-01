@@ -396,7 +396,9 @@ local function buildBundle(mod, opts)
       -- Same order the runtime hashes decoded tuples: seed, op, a, b, c.
       ih = mixChecksum(ih, seed); ih = mixChecksum(ih, eop); ih = mixChecksum(ih, ea)
       ih = mixChecksum(ih, eb); ih = mixChecksum(ih, ec)
-      if STATE_RESET[instr.op] then cur = 0 else cur = (cur * stepA + opn * stepB + stepC) % MOD end
+      -- Canonical opcode (not the alias) drives the chain, so rekeying an
+      -- alias or seed never changes the state a running frame expects.
+      if STATE_RESET[instr.op] then cur = 0 else cur = (cur * stepA + OPNUM[instr.op] * stepB + stepC) % MOD end
     end
     local blob = cipherEncrypt(table.concat(plain), deriveProtoKey(nonce))
 

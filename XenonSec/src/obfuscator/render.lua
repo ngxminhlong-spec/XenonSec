@@ -109,12 +109,13 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
   -- updated to match. A dump taken earlier no longer lines up with memory.
   local function renderOpAliases()
     local groups = KV and KV.opGroups
-    if not groups then return "" end
+    local CANON = ensureName("CANON")
+    if not groups then return "local " .. CANON .. " = {}" end
     local H, RK = ensureName("H"), ensureName("RK")
     local names = {}
     for name in pairs(groups) do names[#names + 1] = name end
     table.sort(names, function(x, y) return groups[x][1] < groups[y][1] end)
-    local stmts, tbl = {}, {}
+    local stmts, tbl, canonTbl = {}, {}, {}
     for _, name in ipairs(names) do
       local g = groups[name]
       local list = {}
@@ -122,12 +123,20 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       for i, k in ipairs(g) do
         if i > 1 then stmts[#stmts + 1] = string.format("%s[%d] = %s[%d]", H, k, H, g[1]) end
         tbl[#tbl + 1] = string.format("[%d] = {%s}", k, table.concat(list, ", "))
+        -- Canonical opcode of every alias: the first key of its group (OPNUM).
+        canonTbl[#canonTbl + 1] = string.format("[%d] = %d", k, g[1])
       end
     end
-    local M, M1, M2 = tostring(KV.MOD), tostring(KV.M1), tostring(KV.M2)
+    local resetList = {}
+    for _, name in ipairs({ "JMP", "JF", "JT", "JNIL", "RET", "RETM" }) do
+      if OPNUM[name] then resetList[#resetList + 1] = string.format("[%d] = true", OPNUM[name]) end
+    end
+    local M, M1, M2, M3 = tostring(KV.MOD), tostring(KV.M1), tostring(KV.M2), tostring(KV.M3)
+    local SA, SB, SC = tostring(KV.SA), tostring(KV.SB), tostring(KV.SC)
     local dec, pr = ensureName("dec"), ensureName("protos")
     local seed = KV.rekeySeed or 1
     local rekeyFn = table.concat({
+      "local " .. CANON .. " = { " .. table.concat(canonTbl, ", ") .. " }",
       "local " .. RK .. " = { g = {" .. table.concat(tbl, ", ") .. "}, s = " .. seed .. " }",
       RK .. ".rekey = function(pi)",
       "  local pp = " .. pr .. "[pi]",
@@ -135,22 +144,28 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       "  if not code then return end",
       "  local dh = 5381",
       "  local function hm(n) dh = (dh * 31 + (n or 0)) % 2147483647 end",
+      "  local RST = { " .. table.concat(resetList, ", ") .. " }",
+      "  -- oc is the decode state of the current instruction. It depends only on",
+      "  -- canonical opcodes, so the rewrite leaves it unchanged.",
+      "  local oc = 0",
       "  for ci = 1, #code do",
       "    local t = code[ci]",
       "    local sd = t[5]",
-      "    local key = " .. dec .. "(t[1], sd, 1)",
-      "    local a2, a3, a4 = " .. dec .. "(t[2], sd, 2), " .. dec .. "(t[3], sd, 3), " .. dec .. "(t[4], sd, 4)",
+      "    local key = " .. dec .. "(t[1], sd, 1, oc)",
+      "    local a2, a3, a4 = " .. dec .. "(t[2], sd, 2, oc), " .. dec .. "(t[3], sd, 3, oc), " .. dec .. "(t[4], sd, 4, oc)",
+      "    local canon = " .. CANON .. "[key] or key",
       "    local grp = " .. RK .. ".g[key] or { key }",
       "    " .. RK .. ".s = (" .. RK .. ".s * 16807) % 2147483647",
       "    local nk = grp[(" .. RK .. ".s % #grp) + 1]",
       "    " .. RK .. ".s = (" .. RK .. ".s * 16807) % 2147483647",
       "    local ns = " .. RK .. ".s % " .. M,
       "    t[5] = ns",
-      "    t[1] = (nk + (ns * " .. M1 .. " + " .. M2 .. ") % " .. M .. ") % " .. M,
-      "    t[2] = (a2 + (ns * " .. M1 .. " + 2 * " .. M2 .. ") % " .. M .. ") % " .. M,
-      "    t[3] = (a3 + (ns * " .. M1 .. " + 3 * " .. M2 .. ") % " .. M .. ") % " .. M,
-      "    t[4] = (a4 + (ns * " .. M1 .. " + 4 * " .. M2 .. ") % " .. M .. ") % " .. M,
+      "    t[1] = (nk + (ns * " .. M1 .. " + oc * " .. M3 .. " + " .. M2 .. ") % " .. M .. ") % " .. M,
+      "    t[2] = (a2 + (ns * " .. M1 .. " + oc * " .. M3 .. " + 2 * " .. M2 .. ") % " .. M .. ") % " .. M,
+      "    t[3] = (a3 + (ns * " .. M1 .. " + oc * " .. M3 .. " + 3 * " .. M2 .. ") % " .. M .. ") % " .. M,
+      "    t[4] = (a4 + (ns * " .. M1 .. " + oc * " .. M3 .. " + 4 * " .. M2 .. ") % " .. M .. ") % " .. M,
       "    hm(ns); hm(t[1]); hm(t[2]); hm(t[3]); hm(t[4])",
+      "    if RST[canon] then oc = 0 else oc = (oc * " .. SA .. " + canon * " .. SB .. " + " .. SC .. ") % " .. M .. " end",
       "  end",
       "  pp.i = dh",
       "end",
