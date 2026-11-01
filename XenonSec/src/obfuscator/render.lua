@@ -102,6 +102,61 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
     return nameCache[tok]
   end
   local resolve -- forward: core blocks are substituted with the same resolver
+  -- Equivalent opcodes. Every extra key is pointed at its opcode's handler,
+  -- and the group table RK.g lists all keys of one opcode. RK.rekey, called
+  -- from PERIODIC, re-encodes one proto's decoded tuples: each instruction
+  -- gets a fresh seed and one of its equivalent keys, and the proto's hash is
+  -- updated to match. A dump taken earlier no longer lines up with memory.
+  local function renderOpAliases()
+    local groups = KV and KV.opGroups
+    if not groups then return "" end
+    local H, RK = ensureName("H"), ensureName("RK")
+    local names = {}
+    for name in pairs(groups) do names[#names + 1] = name end
+    table.sort(names, function(x, y) return groups[x][1] < groups[y][1] end)
+    local stmts, tbl = {}, {}
+    for _, name in ipairs(names) do
+      local g = groups[name]
+      local list = {}
+      for i, k in ipairs(g) do list[#list + 1] = tostring(k) end
+      for i, k in ipairs(g) do
+        if i > 1 then stmts[#stmts + 1] = string.format("%s[%d] = %s[%d]", H, k, H, g[1]) end
+        tbl[#tbl + 1] = string.format("[%d] = {%s}", k, table.concat(list, ", "))
+      end
+    end
+    local M, M1, M2 = tostring(KV.MOD), tostring(KV.M1), tostring(KV.M2)
+    local dec, pr = ensureName("dec"), ensureName("protos")
+    local seed = KV.rekeySeed or 1
+    local rekeyFn = table.concat({
+      "local " .. RK .. " = { g = {" .. table.concat(tbl, ", ") .. "}, s = " .. seed .. " }",
+      RK .. ".rekey = function(pi)",
+      "  local pp = " .. pr .. "[pi]",
+      "  local code = pp.c",
+      "  if not code then return end",
+      "  local dh = 5381",
+      "  local function hm(n) dh = (dh * 31 + (n or 0)) % 2147483647 end",
+      "  for ci = 1, #code do",
+      "    local t = code[ci]",
+      "    local sd = t[5]",
+      "    local key = " .. dec .. "(t[1], sd, 1)",
+      "    local a2, a3, a4 = " .. dec .. "(t[2], sd, 2), " .. dec .. "(t[3], sd, 3), " .. dec .. "(t[4], sd, 4)",
+      "    local grp = " .. RK .. ".g[key] or { key }",
+      "    " .. RK .. ".s = (" .. RK .. ".s * 16807) % 2147483647",
+      "    local nk = grp[(" .. RK .. ".s % #grp) + 1]",
+      "    " .. RK .. ".s = (" .. RK .. ".s * 16807) % 2147483647",
+      "    local ns = " .. RK .. ".s % " .. M,
+      "    t[5] = ns",
+      "    t[1] = (nk + (ns * " .. M1 .. " + " .. M2 .. ") % " .. M .. ") % " .. M,
+      "    t[2] = (a2 + (ns * " .. M1 .. " + 2 * " .. M2 .. ") % " .. M .. ") % " .. M,
+      "    t[3] = (a3 + (ns * " .. M1 .. " + 3 * " .. M2 .. ") % " .. M .. ") % " .. M,
+      "    t[4] = (a4 + (ns * " .. M1 .. " + 4 * " .. M2 .. ") % " .. M .. ") % " .. M,
+      "    hm(ns); hm(t[1]); hm(t[2]); hm(t[3]); hm(t[4])",
+      "  end",
+      "  pp.i = dh",
+      "end",
+    }, "\n")
+    return table.concat(stmts, "\n") .. "\n" .. rekeyFn
+  end
   -- Core handlers, shuffled per build. In Luau output each build also gets a
   -- frame type that lists the VM's real frame fields, and scattered decoy types.
   local function renderCoreHandlers()
@@ -135,6 +190,7 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
     end
     if tok == "CORE_HANDLERS" then return renderCoreHandlers() end
     if tok == "HANDLER_SELFTEST" then return renderSelfTest(ensureName, OPNUM, BINNUM, UNNUM, KV) end
+    if tok == "OPALIASES" then return renderOpAliases() end
     if tok == "ADCHECK" then
       if not antiDebug then return "" end
       -- Every 2048 dispatched instructions, re-probe for an attached hook.
@@ -213,9 +269,15 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       -- Every 4096 steps, verify one proto (rotating through them), so an
       -- edit made after startup is caught as well.
       local pidx = ensureName("pidx")
+      -- With equivalent opcodes on, a proto that passes its check is then
+      -- rekeyed (see OPALIASES). A failed check bricks and is not rekeyed.
+      local onFail = "if not " .. ensureName("vp") .. "(" .. pidx .. ") then " .. ensureName("brick") .. "()"
+      if KV and KV.opGroups then
+        onFail = onFail .. " else " .. ensureName("RK") .. ".rekey(" .. pidx .. ")"
+      end
+      onFail = onFail .. " end"
       local verify = "if " .. probeExpr() .. " % 4096 == 0 then local " .. pidx .. " = (" ..
-             probeExpr() .. " / 4096) % #" .. ensureName("protos") .. " + 1; if not " ..
-             ensureName("vp") .. "(" .. pidx .. ") then " .. ensureName("brick") .. "() end end"
+             probeExpr() .. " / 4096) % #" .. ensureName("protos") .. " + 1; " .. onFail .. " end"
       -- Decoded constants are cached in a plain table. Flush that cache now and
       -- then, so a dump of the table sees only the constants used lately; each
       -- one is decoded again on its next use.

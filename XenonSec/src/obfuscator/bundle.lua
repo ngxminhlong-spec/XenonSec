@@ -213,15 +213,28 @@ local function buildBundle(mod, opts)
   for _, proto in ipairs(mod.protos) do totalInstrB = totalInstrB + #proto.code end
   local decoyCount = decoyHandlerCount(totalInstrB, opts.strength or 1)
   local realCount = #OPCODES + #BINOP_SYMBOLS + #UNOP_SYMBOLS
-  local pool = shuffledRange(realCount + decoyCount)
+  -- Equivalent opcodes: each opcode gets one or two extra keys, all mapped to
+  -- its handler at runtime. Each instruction is encoded with one of its keys
+  -- picked at random, so one opcode shows up under several numbers.
+  local aliasCount, aliasTotal = {}, 0
+  for _, name in ipairs(OPCODES) do
+    aliasCount[name] = math.random(1, 2)
+    aliasTotal = aliasTotal + aliasCount[name]
+  end
+  local pool = shuffledRange(realCount + decoyCount + aliasTotal)
   local poolNext = 0
   local function freeKey()
     poolNext = poolNext + 1
     assert(poolNext <= #pool, "XenonSec: handler key pool exhausted")
     return pool[poolNext]
   end
-  local OPNUM = {}
-  for _, name in ipairs(OPCODES) do OPNUM[name] = freeKey() end
+  local OPNUM, opGroups = {}, {}
+  for _, name in ipairs(OPCODES) do
+    OPNUM[name] = freeKey()
+    local group = { OPNUM[name] }
+    for _ = 1, aliasCount[name] do group[#group + 1] = freeKey() end
+    opGroups[name] = group
+  end
   local BINNUM = {}
   for _, sym in ipairs(BINOP_SYMBOLS) do BINNUM[sym] = freeKey() end
   local UNNUM = {}
@@ -328,7 +341,8 @@ local function buildBundle(mod, opts)
     local ih = 5381
     for _, instr in ipairs(proto.code) do
       local seed = math.random(0, MOD - 1)
-      local opn = OPNUM[instr.op]
+      local group = opGroups[instr.op]
+      local opn = group[math.random(1, #group)]
       local a = instr.a or 0
       local b = instr.b or 0
       local c = instr.c or 0
@@ -380,6 +394,7 @@ local function buildBundle(mod, opts)
     protoLits = protoLits,
     mainProto = mod.mainProto,
     OPNUM = OPNUM,
+    opGroups = opGroups,
     BINNUM = BINNUM,
     UNNUM = UNNUM,
     freeKey = freeKey,
