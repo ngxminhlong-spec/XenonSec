@@ -694,4 +694,20 @@ function Compiler.compile(ast, capturedSet)
 	return mod
 end
 
+-- Compiles a further unit into an existing module (the runtime decoder, see
+-- obfuscator.lua). Its consts and proto indices share the module's spaces.
+-- Returns the unit's main proto index and the first/last proto it added.
+function Compiler.compileInto(mod, ast, capturedSet)
+	local prevCaptured = mod.capturedSet
+	local first = #mod.protos + 1
+	mod.capturedSet = capturedSet or {}
+	local mainProto = newProto(mod, {}, true)
+	local ctx = newCtx(mod, mainProto)
+	compileBlockBare(ast, ctx)
+	emit(ctx, "RET", 1, 1)
+	mod.protos[mainProto].nregs = ctx.maxReg
+	mod.capturedSet = prevCaptured
+	return mainProto, first, #mod.protos
+end
+
 return Compiler

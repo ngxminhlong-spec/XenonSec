@@ -223,104 +223,12 @@ local function %pkey%(%key%, %nn%)
   return %pko%
 end
 
--- LZMA-style decoder for the proto records; mirrors Lzma.decompress in
--- src/obfuscator/lzma.lua. Same range coder and bit models, arithmetic only.
-local function %lzd%(%z%, %maxn%)
-  local %n% = %byte%(%z%, 1) * 16777216 + %byte%(%z%, 2) * 65536 + %byte%(%z%, 3) * 256 + %byte%(%z%, 4)
-  -- A tampered blob can claim any length; the stored raw length bounds the work.
-  if %n% > %maxn% then return "" end
-  local %p% = 5
-  local %rg% = 4294967295
-  local %cd% = 0
-  local function %nx%()
-    local %b% = %byte%(%z%, %p%) or 0
-    %p% = %p% + 1
-    return %b%
-  end
-  for _ = 1, 5 do %cd% = %cd% * 256 + %nx%() end
-  local function %norm%()
-    while %rg% < 16777216 do
-      %rg% = %rg% * 256
-      %cd% = %cd% * 256 + %nx%()
-    end
-  end
-  local function %bit%(%pb%, %ix%)
-    local %pr% = %pb%[%ix%]
-    local %bd% = math.floor(%rg% / 2048) * %pr%
-    local %bt% = 0
-    if %cd% < %bd% then
-      %rg% = %bd%
-      %pb%[%ix%] = %pr% + math.floor((2048 - %pr%) / 32)
-    else
-      %cd% = %cd% - %bd%
-      %rg% = %rg% - %bd%
-      %pb%[%ix%] = %pr% - math.floor(%pr% / 32)
-      %bt% = 1
-    end
-    %norm%()
-    return %bt%
-  end
-  local function %tree%(%pb%, %nb%)
-    local %m% = 1
-    for _ = 1, %nb% do %m% = %m% * 2 + %bit%(%pb%, %m%) end
-    return %m% - 2 ^ %nb%
-  end
-  local function %direct%(%nb%)
-    local %v% = 0
-    for _ = 1, %nb% do
-      %rg% = math.floor(%rg% / 2)
-      local %bt% = 0
-      if %cd% >= %rg% then %cd% = %cd% - %rg%; %bt% = 1 end
-      %v% = %v% * 2 + %bt%
-      %norm%()
-    end
-    return %v%
-  end
-  local function %probs%(%k%)
-    local t = {}
-    for i = 1, %k% do t[i] = 1024 end
-    return t
-  end
-  local %isM% = %probs%(12)
-  local %lit% = %probs%(256)
-  local %lc% = %probs%(2)
-  local %ll% = %probs%(16)
-  local %lm% = %probs%(16)
-  local %lh% = %probs%(256)
-  local %ps% = { %probs%(64), %probs%(64), %probs%(64), %probs%(64) }
-  local %out% = {}
-  local %cnt% = 0
-  local %lzs% = 0
-  while %cnt% < %n% do
-    if %bit%(%isM%, %lzs% + 1) == 0 then
-      %cnt% = %cnt% + 1
-      %out%[%cnt%] = %tree%(%lit%, 8)
-      if %lzs% < 4 then %lzs% = 0 elseif %lzs% < 10 then %lzs% = %lzs% - 3 else %lzs% = %lzs% - 6 end
-    else
-      local len
-      if %bit%(%lc%, 1) == 0 then len = %tree%(%ll%, 3) + 2
-      elseif %bit%(%lc%, 2) == 0 then len = %tree%(%lm%, 3) + 10
-      else len = %tree%(%lh%, 8) + 18 end
-      local slot = %tree%(%ps%[math.min(len - 2, 3) + 1], 6)
-      local d
-      if slot < 4 then
-        d = slot
-      else
-        local nd = math.floor(slot / 2) - 1
-        d = (2 + slot % 2) * 2 ^ nd + %direct%(nd)
-      end
-      local dist = d + 1
-      for _ = 1, len do
-        %cnt% = %cnt% + 1
-        %out%[%cnt%] = %out%[%cnt% - dist]
-      end
-      if %lzs% < 7 then %lzs% = 7 else %lzs% = 10 end
-    end
-  end
-  local %parts% = {}
-  for i = 1, %cnt% do %parts%[i] = string.char(%out%[i]) end
-  return table.concat(%parts%)
-end
+-- The LZMA decoder is bytecode of this VM (see templates/lzdec.lua). %ENG% is
+-- the engine, assigned by the footer; %mkLzd% builds the decoder the first time
+-- a compressed proto is decoded. Declared here, defined after the globals.
+local %ENG%
+local %lzdFn%
+local %mkLzd%
 
 -- Lazy proto decode, called by the engine the first time a proto runs. The
 -- blob is decrypted and decompressed to raw records. The masked tuples are
@@ -329,7 +237,11 @@ end
 -- against the stored hash (field i) before anything can run them.
 local function %dproto%(%pr%)
   local %pk% = %pkey%(%buildKey%(), %pr%.n)
-  local %raw% = %lzd%(%decodeK%(%pr%.b, %pk%), %pr%.r)
+  local %rawz% = %decodeK%(%pr%.b, %pk%)
+  local %raw% = %rawz%
+  -- Runtime-decoder protos are stored without compression: they are what
+  -- decompresses everything else.
+  if not %pr%.w then %raw% = %mkLzd%()(%rawz%, %pr%.r) end
   local %code% = {}
   local %dh% = 5381
   local function %hm%(%n%) %dh% = (%dh% * 31 + (%n% or 0)) % 2147483647 end
@@ -415,6 +327,7 @@ local function %verify%()
   for %vpi% = 1, #%protos% do
     local %vpr% = %protos%[%vpi%]
     %mix%(%vpr%.v and 1 or 0)
+    %mix%(%vpr%.w and 1 or 0)
     %mix%(%vpr%.n)
     local %vpb% = %vpr%.b
     for %vbj% = 1, #%vpb% do %mix%(%byte%(%vpb%, %vbj%)) end
@@ -486,6 +399,15 @@ local %consts% = setmetatable({}, { __index = function(%ct%, %i2%)
   rawset(%ct%, %i2%, %val%)
   return %val%
 end })
+
+-- Builds the runtime decoder by running its unit on this same engine. Its
+-- protos are raw, so building it never recurses into this function.
+%mkLzd% = function()
+  if not %lzdFn% then
+    %lzdFn% = %ENG%({ %consts%, %protos%, __XS_DECMAIN__, %adStep%, %GETG%, %SETG%, %dproto%, %poison% })
+  end
+  return %lzdFn%
+end
 
 -- Watermark integrity: the decoded copy must gsub-match the exact
 -- expected text. This can only ever fail alongside the checksum

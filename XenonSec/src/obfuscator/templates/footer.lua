@@ -5,4 +5,5 @@
 
 return [===[
 if not %verify%() then %corrupt%() end
-return (%engine%)({ %consts%, %protos%, __XS_MAIN__, %adStep%, %GETG%, %SETG%, %dproto%, %poison% }, ...)]===]
+%ENG% = %engine%
+return %ENG%({ %consts%, %protos%, __XS_MAIN__, %adStep%, %GETG%, %SETG%, %dproto%, %poison% }, ...)]===]

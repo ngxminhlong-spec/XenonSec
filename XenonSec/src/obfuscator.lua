@@ -39,6 +39,7 @@ local ANTIDEBUG_TEMPLATE = load("templates/antidebug")
 local VM_TEMPLATE = load("templates/vm")
 local CORE_BLOCKS = load("templates/core_handlers")
 local CORE_VARIANTS = load("templates/core_variants")
+local LZDEC_TEMPLATE = load("templates/lzdec")
 local _tm = load("typemangler")
 local buildTypeMangler, scatterType = _tm.buildTypeMangler, _tm.scatterType
 
@@ -100,6 +101,17 @@ local function obfuscateOnce(source, chunkname, opts)
   Renamer.resolve(ast)
   local captured = Capture.analyze(ast)
   local mod = Compiler.compile(ast, captured)
+
+  -- The LZMA decoder that unpacks the protos ships as bytecode of this same
+  -- VM, not as readable Lua. It is compiled into the module as its own unit,
+  -- and its protos are stored raw (cipher only), because they are what the
+  -- runtime needs to decode everything else. The adaptation rate is chosen per
+  -- build, and the compressor is told the same value.
+  mod.lzD = ({ 16, 32 })[math.random(1, 2)]
+  local decAst = Parser.parse(LZDEC_TEMPLATE:gsub("__LZ_D__", tostring(mod.lzD)), "=xenon-decoder", false)
+  Renamer.resolve(decAst)
+  local decMain, decFirst, decLast = Compiler.compileInto(mod, decAst, Capture.analyze(decAst))
+  mod.decMain, mod.rawFirst, mod.rawLast = decMain, decFirst, decLast
 
   -- Auto-scale hardening density to the size of the *real* program
   -- (measured before junk is injected, so the decision isn't fed by
@@ -253,6 +265,7 @@ local function obfuscateOnce(source, chunkname, opts)
   header = header:gsub("__XS_ANTITAMPER_ON__", tostring(opts.antiTamper))
   header = header:gsub("__XS_ANTIDEBUG__", tostring(opts.antiDebug))
   header = header:gsub("__XS_WMIDX__", tostring(bundle.watermarkIdx))
+  header = header:gsub("__XS_DECMAIN__", tostring(bundle.decMain))
   -- Built here, after resolveShared exists, so the corrupt() helper is
   -- emitted under its renamed identifier like everything else in the header.
   -- Live getters for the standard builtins (see %LIVE% in the header).

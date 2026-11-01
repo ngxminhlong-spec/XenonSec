@@ -114,6 +114,7 @@ local function %run%(%mod%, ...)
     local %hh% = 5381
     local function %mm%(%n%) %hh% = (%hh% * 31 + (%n% or 0)) % 2147483647 end
     %mm%(%pp%.v and 1 or 0)
+    %mm%(%pp%.w and 1 or 0)
     %mm%(%pp%.n)
     for %vk% = 1, #%pp%.b do %mm%(%byte%(%pp%.b, %vk%)) end
     for %vj% = 1, #%pp%.p do %mm%(%pp%.p[%vj%][1]); %mm%(%pp%.p[%vj%][2]) end

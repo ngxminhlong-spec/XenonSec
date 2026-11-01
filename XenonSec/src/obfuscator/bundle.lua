@@ -375,11 +375,16 @@ local function buildBundle(mod, opts)
   -- Opcodes after which the decode state resets to 0 (mirrors Passes.STATE_RESET).
   local STATE_RESET = { JMP = true, JF = true, JT = true, JNIL = true, RET = true, RETM = true }
   local protoLits = {}
-  for _, proto in ipairs(mod.protos) do
+  for pi, proto in ipairs(mod.protos) do
     local nonce = math.random(1, MOD - 1)
     local hasV = proto.hasVararg and 1 or 0
+    -- Runtime-decoder protos are stored without LZMA (they are what decodes
+    -- LZMA), so the runtime must know which ones to skip; the flag is covered
+    -- by both checksums.
+    local rawF = (mod.rawFirst and pi >= mod.rawFirst and pi <= mod.rawLast) and 1 or 0
     checksum = mixChecksum(checksum, hasV)
-    local psum = mixChecksum(5381, hasV)
+    checksum = mixChecksum(checksum, rawF)
+    local psum = mixChecksum(mixChecksum(5381, hasV), rawF)
 
     -- Raw records: four 3-byte fields (opcode alias, a, b, c). Masks are not
     -- stored; the runtime rebuilds them from the nonce, so the records compress.
@@ -415,7 +420,9 @@ local function buildBundle(mod, opts)
       -- alias or seed never changes the state a running frame expects.
       if STATE_RESET[instr.op] then cur = 0 else cur = (cur * stepA + OPNUM[instr.op] * stepB + stepC) % MOD end
     end
-    local blob = cipherEncrypt(lzmaCompress(table.concat(raw)), deriveProtoKey(nonce))
+    local body = table.concat(raw)
+    if rawF == 0 then body = lzmaCompress(body, mod.lzD) end
+    local blob = cipherEncrypt(body, deriveProtoKey(nonce))
 
     -- Integrity: the nonce and every ciphertext byte are covered, in the same
     -- order the runtime's %verify% and %vp% use.
@@ -437,9 +444,10 @@ local function buildBundle(mod, opts)
     end
     checksum = mixChecksum(checksum, psum)
     protoLits[#protoLits + 1] = string.format(
-      "{p={%s},v=%s,k=%d,n=%d,i=%d,r=%d,b=%s}",
+      "{p={%s},v=%s,w=%s,k=%d,n=%d,i=%d,r=%d,b=%s}",
       table.concat(paramParts, ","),
       proto.hasVararg and "true" or "false",
+      rawF == 1 and "true" or "false",
       psum, nonce, ih, #table.concat(raw), luaBytes(blob)
     )
   end
@@ -455,6 +463,7 @@ local function buildBundle(mod, opts)
     maskA = maskA,
     protoLits = protoLits,
     mainProto = mod.mainProto,
+    decMain = mod.decMain,
     OPNUM = OPNUM,
     opGroups = opGroups,
     BINNUM = BINNUM,

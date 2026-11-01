@@ -24,6 +24,10 @@ local K_CHAIN = 32            -- candidates examined per position
 
 local floor = math.floor
 
+-- Probability adaptation divisor (2^shift). Chosen per build by the caller;
+-- the decoder template must use the same value.
+local ADAPT = 32
+
 -- Probability models ------------------------------------------------------
 
 local function newModel()
@@ -77,11 +81,11 @@ local function encBit(rc, probs, idx, bit)
   local bound = floor(rc.range / 2048) * p
   if bit == 0 then
     rc.range = bound
-    probs[idx] = p + floor((2048 - p) / 32)
+    probs[idx] = p + floor((2048 - p) / ADAPT)
   else
     rc.low = rc.low + bound
     rc.range = rc.range - bound
-    probs[idx] = p - floor(p / 32)
+    probs[idx] = p - floor(p / ADAPT)
   end
   normalize(rc)
 end
@@ -151,7 +155,8 @@ end
 
 -- Compressor ----------------------------------------------------------------
 
-function Lzma.compress(s)
+function Lzma.compress(s, adapt)
+  ADAPT = adapt or 32
   local n = #s
   local rc = newEncoder()
   local m = newModel()
@@ -209,7 +214,8 @@ end
 
 -- Decompressor (reference for the runtime decoder in the header) -----------
 
-function Lzma.decompress(z)
+function Lzma.decompress(z, adapt)
+  ADAPT = adapt or 32
   local n = z:byte(1) * 16777216 + z:byte(2) * 65536 + z:byte(3) * 256 + z:byte(4)
   local p = 5
   local function nextByte()
@@ -232,12 +238,12 @@ function Lzma.decompress(z)
     local bit
     if code < bound then
       range = bound
-      probs[idx] = pr + floor((2048 - pr) / 32)
+      probs[idx] = pr + floor((2048 - pr) / ADAPT)
       bit = 0
     else
       code = code - bound
       range = range - bound
-      probs[idx] = pr - floor(pr / 32)
+      probs[idx] = pr - floor(pr / ADAPT)
       bit = 1
     end
     normalize()
