@@ -159,15 +159,15 @@ end
     local %want% = %CKH%[%k%]
     if %want% and %want% ~= 0 then
       local %got% = %ckDump%(%CKS%[%k%])
-      if %got% and %got% ~= %want% then %adMix% = (%adMix% + 113) % 65521 end
+      if %got% and %got% ~= %want% then %adMix% = %adMix% + 113 end
     end
     return
   end
   if %si% == 5 then
-    %adMix% = (%adMix% + %selfTest%() * 127) % 65521
+    %adMix% = %adMix% + %selfTest%() * 127
     return
   end
-  %adMix% = (%adMix% + %CKS%[%si%](%realEnv%())) % 65521
+  %adMix% = %adMix% + %CKS%[%si%](%realEnv%())
 end
 if __XS_ANTIDEBUG__ then
   for %sk% = 1, 5 do %adStep%(%sk%) end

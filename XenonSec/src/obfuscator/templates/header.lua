@@ -60,10 +60,13 @@ local function %buildKey%()
     local %c% = (%vault%[%pc%] - (%pc% * %sm1% + %sm2%) % 256) % 256
     %k%[%i%] = %bxor%(%bxor%(%a%, %b%), %c%)
   end
-  -- Clean builds: both terms are zero and the key is unchanged. A check that
-  -- fired shifts every byte, so decoding silently produces wrong values.
-  if %kbad% or %adMix% ~= 0 then
-    for %i% = 1, %n% do %k%[%i%] = (%k%[%i%] + (%kbad% and 97 or 0) + %adMix% * %i%) % 256 end
+  -- Clean builds: the state is zero and the key is unchanged. Otherwise the
+  -- shift is 1..255, and XOR with a nonzero value changes every byte, so no
+  -- state value (even a multiple of 256) can leave the key clean.
+  local %st% = %adMix% + (%kbad% and 1 or 0)
+  if %st% ~= 0 then
+    local %sh% = (%st% % 255) + 1
+    for %i% = 1, %n% do %k%[%i%] = %bxor%(%k%[%i%], %sh%) end
   end
   return %k%
 end
