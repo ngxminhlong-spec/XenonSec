@@ -223,7 +223,7 @@ end
 -- can run them; a mismatch leaves no usable opcodes.
 local function %dproto%(%pr%)
   local %pk% = %pkey%(%buildKey%(), %pr%.n)
-  %adStep%(%pr%.n % 4 + 1)
+  %adStep%(%pr%.n % 5 + 1)
   local %plain% = %decodeK%(%pr%.b, %pk%)
   local %code% = {}
   local %dh% = 5381
@@ -376,43 +376,94 @@ end
 -- Each check returns a number: 0 when it sees nothing, nonzero when it does.
 -- Nothing branches on a check's outcome. The result is summed into %adMix%
 -- and the key is derived from it, so removing one check's effect changes the
--- decoded values, not just one flag.
+-- decoded values, not just one flag. Each check takes its inputs as a table,
+-- so the same code runs on the live environment and on the mocks below.
 -- 1: a debug hook is set on the main thread.
-local %ck1% = function()
-  if not %hookFn% then return 0 end
-  local %ok%, %h%  = %pcallC%(%hookFn%)
+local %ck1% = function(%e%)
+  if not %e%.hook then return 0 end
+  local %ok%, %h%  = %pcallC%(%e%.hook)
   if %ok% and %h% ~= nil then return 53 end
   return 0
 end
 -- 2: a debug hook is set on the running coroutine.
-local %ck2% = function()
-  if not (%hookFn% and %coRunFn%) then return 0 end
-  local %ok%, %co% = %pcallC%(%coRunFn%)
+local %ck2% = function(%e%)
+  if not (%e%.hook and %e%.coRun) then return 0 end
+  local %ok%, %co% = %pcallC%(%e%.coRun)
   if not (%ok% and %co%) then return 0 end
-  local %gok%, %gh% = %pcallC%(%hookFn%, %co%)
+  local %gok%, %gh% = %pcallC%(%e%.hook, %co%)
   if %gok% and %gh% ~= nil then return 61 end
   return 0
 end
 -- 3: the captured debug functions must themselves be the engine's C functions
 -- (a wrapper installed before load is a Lua function).
-local %ck3% = function()
-  if not (%dbgLib% and %hookFn% and %infoFn%) then return 0 end
-  local %a%, %ai% = %pcallC%(%infoFn%, %infoFn%, "S")
+local %ck3% = function(%e%)
+  if not (%e%.dbg and %e%.hook and %e%.info) then return 0 end
+  local %a%, %ai% = %pcallC%(%e%.info, %e%.info, "S")
   if %a% and %ai% and %ai%.what ~= "C" then return 71 end
-  local %b%, %bi% = %pcallC%(%infoFn%, %hookFn%, "S")
+  local %b%, %bi% = %pcallC%(%e%.info, %e%.hook, "S")
   if %b% and %bi% and %bi%.what ~= "C" then return 89 end
   return 0
 end
 -- 4: the debug library and its fields still hold what was captured at load.
--- This also covers check 3's inputs, so the checks watch each other.
-local %ck4% = function()
-  if not %dbgLib% then return 0 end
-  if %base%[%NM%.debug] ~= %dbgLib% then return 97 end
-  if %dbgLib%[%NM%.gethook] ~= %hookFn% then return 41 end
-  if %dbgLib%[%NM%.getinfo] ~= %infoFn% then return 13 end
+local %ck4% = function(%e%)
+  if not %e%.dbg then return 0 end
+  if %e%.liveDbg ~= %e%.dbg then return 97 end
+  if %e%.liveHook ~= %e%.hook then return 41 end
+  if %e%.liveInfo ~= %e%.info then return 13 end
   return 0
 end
 local %CKS% = { %ck1%, %ck2%, %ck3%, %ck4% }
+
+-- Live inputs for the checks, read now. Without a debug library every live
+-- value equals its captured value, so the comparisons agree. One table is
+-- reused for every call.
+local %RE% = { }
+local %realEnv% = function()
+  local %e% = %RE%
+  %e%.hook = %hookFn%; %e%.coRun = %coRunFn%; %e%.info = %infoFn%; %e%.dbg = %dbgLib%
+  if %dbgLib% then
+    %e%.liveDbg = %base%[%NM%.debug]
+    %e%.liveHook = %dbgLib%[%NM%.gethook]
+    %e%.liveInfo = %dbgLib%[%NM%.getinfo]
+  else
+    %e%.liveDbg, %e%.liveHook, %e%.liveInfo = nil, %hookFn%, %infoFn%
+  end
+  return %e%
+end
+
+-- Known-answer self-test (works on every Lua version and on Luau). Each check
+-- runs on mock inputs whose correct result is known. A check that was patched
+-- to return something else disagrees with at least one mock. The mocks and
+-- their expected results are built once, at load. %selfTest% returns the
+-- number of disagreements.
+local %hookOn% = function() return true end
+local %hookOff% = function() return nil end
+local %coHook% = function(%th%) if %th% then return true end end
+local %coStub% = function() return "co" end
+local %infoLua% = function() return { what = "Lua" } end
+local %infoC% = function() return { what = "C" } end
+local %dd% = {}
+local %STC% = {
+  { %ck1%, { hook = %hookOn% }, 53 },
+  { %ck1%, { hook = %hookOff% }, 0 },
+  { %ck2%, { hook = %coHook%, coRun = %coStub% }, 61 },
+  { %ck2%, { hook = %hookOff%, coRun = %coStub% }, 0 },
+  { %ck3%, { dbg = %dd%, hook = %hookOff%, info = %infoLua% }, 71 },
+  { %ck3%, { dbg = %dd%, hook = %hookOff%, info = %infoC% }, 0 },
+  { %ck4%, { dbg = %dd%, hook = %hookOff%, info = %infoC%,
+      liveDbg = {}, liveHook = %hookOff%, liveInfo = %infoC% }, 97 },
+  { %ck4%, { dbg = %dd%, hook = %hookOff%, info = %infoC%,
+      liveDbg = %dd%, liveHook = %hookOff%, liveInfo = %infoC% }, 0 },
+}
+local %selfTest% = function()
+  local %bad% = 0
+  for %ti% = 1, #%STC% do
+    local %t% = %STC%[%ti%]
+    if %t%[1](%t%[2]) ~= %t%[3] then %bad% = %bad% + 1 end
+  end
+  return %bad%
+end
+
 -- Code check: each check's string.dump (stripped) hashed at build time. The
 -- build fills %CKH% and %DPFX%; a zero hash disables that check (Luau, or a
 -- build made without a Lua 5.3 probe). A dump of another Lua version or
@@ -429,23 +480,37 @@ local function %ckDump%(%f%)
   for %j% = 1, #%s% do %h% = (%h% * 31 + %s%:byte(%j%)) % 2147483647 end
   return %h%
 end
+
+-- Index 1-4: run a check on the live inputs. Index 5: the known-answer
+-- self-test. Index 11-14: the code hash of check 1-4 (kept off the decoders'
+-- path, since hashing is much more work than a live check). A disagreement
+-- adds to the state.
 %adStep% = function(%si%)
   if not __XS_ANTIDEBUG__ then return end
-  %adMix% = (%adMix% + %CKS%[%si%]()) % 65521
-  local %want% = %CKH%[%si%]
-  if %want% ~= 0 then
-    local %got% = %ckDump%(%CKS%[%si%])
-    if %got% and %got% ~= %want% then %adMix% = (%adMix% + 113) % 65521 end
+  if %si% > 10 then
+    local %k% = %si% - 10
+    local %want% = %CKH%[%k%]
+    if %want% and %want% ~= 0 then
+      local %got% = %ckDump%(%CKS%[%k%])
+      if %got% and %got% ~= %want% then %adMix% = (%adMix% + 113) % 65521 end
+    end
+    return
   end
+  if %si% == 5 then
+    %adMix% = (%adMix% + %selfTest%() * 127) % 65521
+    return
+  end
+  %adMix% = (%adMix% + %CKS%[%si%](%realEnv%())) % 65521
 end
 if __XS_ANTIDEBUG__ then
-  for %sk% = 1, 4 do %adStep%(%sk%) end
+  for %sk% = 1, 5 do %adStep%(%sk%) end
+  for %sk% = 11, 14 do %adStep%(%sk%) end
 end
 
 -- Constants are decrypted on first use and cached, so a constant the
 -- program never touches is never decrypted at all.
 local %consts% = setmetatable({}, { __index = function(%ct%, %i2%)
-  %adStep%(%i2% % 4 + 1)
+  %adStep%(%i2% % 5 + 1)
   local %dv% = %decode%(%raw%[%i2%])
   local %tg% = %dv%:byte(1)
   local %val%

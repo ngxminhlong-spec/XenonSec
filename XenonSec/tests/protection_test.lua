@@ -358,7 +358,7 @@ do
   local src = "local t = 0 for i = 1, 3000 do t = t + i end print(t)"
   -- Names are randomized, so match the shape: "if <counter> % <period> ==
   -- <residue> then <name>(<index>) end" (the minifier may drop spaces).
-  local shape = "if [%w_%.]+%s*%%%s*%d+%s*==%s*%d+%s*then%s*[%w_]+%(%d%)%s*end"
+  local shape = "if [%w_%.]+%s*%%%s*%d+%s*==%s*%d+%s*then%s*[%w_]+%(%d+%)%s*end"
   local out = Obf.obfuscate(src, "t", { antiDebug = true })
   local _, calls = out:gsub(shape, "")
   check("anti-debug build places several periodic checks", calls >= 3, "placements=" .. calls)
@@ -391,6 +391,34 @@ do
     check("an edited check is caught with no debugger attached", not okBad and #captured == 0,
       ("ok=%s captured=%d"):format(tostring(okBad), #captured))
   end
+end
+
+do
+  -- Known-answer self-test: with the bytecode check switched off (the dump
+  -- prefix is changed so it never matches, as on another Lua version), an
+  -- edited check is still caught. This is the path that works on Lua 5.1 and
+  -- Luau.
+  local src = 'print("selftest run")'
+  local out = Obf.obfuscate(src, "t", { antiDebug = true })
+  local off, nOff = out:gsub("\\027Lua", "\\000Lua", 1)
+  check("bytecode-check prefix found in the output", nOff == 1, "n=" .. nOff)
+  local function runOut(text)
+    local chunk = load(text, "t")
+    local captured = {}
+    local realPrint = print
+    print = function(...) captured[#captured + 1] = table.concat({ ... }, "\t") end
+    local okRun = pcall(chunk)
+    print = realPrint
+    return okRun, #captured
+  end
+  local okClean, nClean = runOut(off)
+  check("bytecode check off: unedited build runs", okClean and nClean == 1,
+    ("ok=%s captured=%d"):format(tostring(okClean), nClean))
+  local tampered, nT = off:gsub("return 53", "return 0", 1)
+  check("bytecode check off: tamper target found", nT == 1, "n=" .. nT)
+  local okBad, nBad = runOut(tampered)
+  check("bytecode check off: an edited check is still caught by the self-test",
+    not okBad and nBad == 0, ("ok=%s captured=%d"):format(tostring(okBad), nBad))
 end
 
 print()
