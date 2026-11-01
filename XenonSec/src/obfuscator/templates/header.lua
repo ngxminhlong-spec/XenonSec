@@ -5,9 +5,6 @@
 
 return [===[
 --[[Protected by XenonSec]]
-local %byte% = string.byte
-local %char% = string.char
-local %concat% = table.concat
 __XS_STD__
 __XS_TYPEMANGLER__
 local function %bxor%(%a%, %b%)

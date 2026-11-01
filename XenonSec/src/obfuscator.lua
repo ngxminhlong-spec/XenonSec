@@ -162,6 +162,14 @@ local function obfuscateOnce(source, chunkname, opts)
   local PROXY_M = 1048576
   local proxyA = 2 * math.random(0, 524287) + 1
   local proxyB = math.random(0, PROXY_M - 1)
+  -- Shared identifiers: the engine uses the same byte/char/concat locals as the
+  -- header's standard-library bootstrap, so it resolves them through this cache.
+  local nameCache = {}
+  local function resolveShared(tok)
+    if tok == "engine" then return nil end -- filled per-template below
+    if not nameCache[tok] then nameCache[tok] = randomIdent() end
+    return nameCache[tok]
+  end
   local engineSrc = renderTemplate(vmSrc, bundle.OPNUM, bundle.BINNUM, bundle.UNNUM, totalInstr, opts.antiDebug,
     { mba = opts.mba ~= false, M1 = bundle.saltM1, M2 = bundle.saltM2, M3 = bundle.saltM3, SA = bundle.stepA, SB = bundle.stepB, SC = bundle.stepC, MOD = bundle.mod, strength = opts.strength or 1,
       proxify = opts.proxify and true or false, PA = proxyA, PB = proxyB, PM = PROXY_M,
@@ -171,7 +179,8 @@ local function obfuscateOnce(source, chunkname, opts)
       wm = bundle.watermarkIdx, three = bundle.threeIdx,
       minifyFn = opts.minify and minifyTemplateText or nil, luauTypes = useTypes,
       scatterType = scatterType,
-      opGroups = bundle.opGroups, rekeySeed = math.random(1, 2147483646) })
+      opGroups = bundle.opGroups, rekeySeed = math.random(1, 2147483646),
+      shared = function(tok) return resolveShared(tok) end })
 
   local vaultLit = table.concat(bundle.vault, ",")
   local kmapLit = table.concat(bundle.kmap, ",")
@@ -187,13 +196,6 @@ local function obfuscateOnce(source, chunkname, opts)
 
   -- Shared names between header and footer (consts/protos locals) must
   -- match, so render both from one nameCache.
-  local nameCache = {}
-  local function resolveShared(tok)
-    if tok == "engine" then return nil end -- filled per-template below
-    if not nameCache[tok] then nameCache[tok] = randomIdent() end
-    return nameCache[tok]
-  end
-
   local headerTpl = opts.minify and minifyTemplateText(HEADER_TEMPLATE) or HEADER_TEMPLATE
   local footerTpl = opts.minify and minifyTemplateText(FOOTER_TEMPLATE) or FOOTER_TEMPLATE
 
@@ -214,8 +216,9 @@ local function obfuscateOnce(source, chunkname, opts)
   local stdNames = {
     G = resolveShared("stdG"), dec = resolveShared("stdDec"), t = resolveShared("stdT"),
     o = resolveShared("stdO"), j = resolveShared("stdJ"),
-    char = resolveShared("char"), concat = resolveShared("concat"),
-    base = resolveShared("base"),
+    char = resolveShared("char"), byte = resolveShared("byte"), concat = resolveShared("concat"),
+    base = resolveShared("base"), sm = resolveShared("bsm"), f = resolveShared("bf"),
+    ok = resolveShared("bok"), r = resolveShared("br"),
   }
   header = rewriteStd(header, stdTab, stdList, stdIndex)
   header = header:gsub("__XS_VAULT__", vaultLit)
@@ -303,8 +306,9 @@ local function obfuscateOnce(source, chunkname, opts)
   footer = rewriteStd(footer, stdTab, stdList, stdIndex)
   local tmText = useTypes and buildTypeMangler() or nil
   header = header:gsub("__XS_TYPEMANGLER__", function() return tmText or "" end)
+  -- Always emitted: the header needs byte/char/concat even when no library
+  -- name is referenced directly.
   header = header:gsub("__XS_STD__", function()
-    if #stdList == 0 then return "" end
     return buildStdBlock(stdTab, stdList, stdNames, stdSalt)
   end)
   footer = footer:gsub("__XS_MAIN__", tostring(bundle.mainProto))

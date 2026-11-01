@@ -35,12 +35,17 @@ for i = 1, 10 do t[i] = string.format("%d", i) end
 print(table.concat(t, ","), math.floor(3.7), select("#", 1, 2))
 ]]
   local out = Obf.obfuscate(src, "t", { minSize = false, luau = false })
-  for _, name in ipairs({ "string.format", "math.random", "math.floor", "table.unpack", "getmetatable", "table.remove" }) do
+  for _, name in ipairs({ "string.format", "math.random", "math.floor", "table.unpack", "table.remove" }) do
     check("output has no readable " .. name, not out:find(name, 1, true))
   end
-  -- The bootstrap names are the only literal string.byte / string.char uses left.
-  local _, nb = out:gsub("string%.byte", "")
-  check("bootstrap string.byte appears only in the bootstrap (<= 2)", nb <= 2, "count " .. nb)
+  -- The bootstrap finds string.char / string.byte / table.concat by behaviour,
+  -- so none of those names appear. getmetatable is the one visible root, used
+  -- once to reach the string library.
+  for _, name in ipairs({ "string.byte", "string.char", "table.concat" }) do
+    check("bootstrap has no readable " .. name, not out:find(name, 1, true))
+  end
+  local _, gm = out:gsub("getmetatable", "")
+  check("getmetatable appears only once (the bootstrap root)", gm == 1, "count " .. gm)
 end
 
 -- 2. Correct output over several flush cycles, flush on and off.

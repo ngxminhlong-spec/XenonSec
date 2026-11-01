@@ -124,10 +124,23 @@ local function buildStdBlock(tabName, list, names, salt)
   -- Root of the lookups: on Lune and some sandboxes _G is an empty table, but
   -- getfenv(0) still reaches the globals; plain Lua has no getfenv, so _G there.
   lines[#lines + 1] = string.format("local %s, %s = {}, (getfenv and getfenv(0)) or _G", tabName, names.G)
+  -- Bootstrap, found by behaviour rather than by name: the string library is
+  -- reached through the string metatable, and string.char is the function that
+  -- gives "AB" for (65, 66); string.byte gives 65, 66 for ("AB", 1, 2).
   lines[#lines + 1] = string.format(
-    "local function %s(%s) local %s = {} for %s = 1, #%s do %s[%s] = %s((%s[%s] - %d) %% 256) end return %s(%s) end",
-    names.dec, names.t, names.o, names.j, names.t, names.o, names.j, names.char,
-    names.t, names.j, salt, names.concat, names.o)
+    'local %s, %s; do local %s = getmetatable("").__index for _, %s in pairs(%s) do if type(%s) == "function" then local %s, %s = pcall(%s, 65, 66) if %s and %s == "AB" then %s = %s end local %s, %s, %s = pcall(%s, "AB", 1, 2) if %s and %s == 65 and %s == 66 then %s = %s end end end end',
+    names.byte, names.char,
+    names.sm, names.f, names.sm, names.f,
+    names.ok, names.r, names.f, names.ok, names.r, names.char, names.f,
+    names.ok, names.r, names.j, names.f, names.ok, names.r, names.j, names.byte, names.f)
+  -- Name decoder: builds the string byte by byte, so it needs no table library.
+  lines[#lines + 1] = string.format(
+    "local function %s(%s) local %s = \"\" for %s = 1, #%s do %s = %s .. %s((%s[%s] - %d) %% 256) end return %s end",
+    names.dec, names.t, names.o, names.j, names.t, names.o, names.o, names.char,
+    names.t, names.j, salt, names.o)
+  -- table.concat, resolved through the same encoded lookup as everything else.
+  lines[#lines + 1] = string.format("local %s = %s[%s(%s)][%s(%s)]",
+    names.concat, names.G, names.dec, enc("table"), names.dec, enc("concat"))
   for k, path in ipairs(list) do
     local expr = names.G
     for part in path:gmatch("[^%.]+") do

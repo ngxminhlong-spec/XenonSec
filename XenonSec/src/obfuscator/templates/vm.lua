@@ -5,9 +5,6 @@
 
 return [===[
 local %unpack% = table.unpack or unpack
-local %byte% = string.byte
-local %char% = string.char
-local %concat% = table.concat
 
 local function %bxor%(%a%, %b%)
   local %r%, %bit%, %x%, %y% = 0, 1, %a%, %b%

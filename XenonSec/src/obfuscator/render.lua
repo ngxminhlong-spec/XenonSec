@@ -197,6 +197,9 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
     return ensureName("F") .. "." .. ensureName("pr")
   end
   resolve = function(tok)
+    if KV.shared and (tok == "byte" or tok == "char" or tok == "concat") then
+      return KV.shared(tok)
+    end
     if tok == "ANN_F" then
       return KV.luauTypes and (": " .. ensureName("FrameT")) or ""
     end
