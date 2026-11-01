@@ -220,24 +220,66 @@ local function %pkey%(%key%, %nn%)
   return %pko%
 end
 
+-- LZSS decoder, mirror of lzCompress in bundle.lua: a 4-byte raw length, then
+-- flag-byte groups of literals (bit clear) and 2-byte matches (bit set).
+local function %lzd%(%s%)
+  local %n% = %byte%(%s%, 1) * 16777216 + %byte%(%s%, 2) * 65536 + %byte%(%s%, 3) * 256 + %byte%(%s%, 4)
+  local %out% = {}
+  local %len% = 0
+  local %p% = 5
+  while %len% < %n% do
+    local %fl% = %byte%(%s%, %p%)
+    %p% = %p% + 1
+    for %bit% = 0, 7 do
+      if %len% >= %n% then break end
+      if math.floor(%fl% / 2 ^ %bit%) % 2 == 0 then
+        %len% = %len% + 1
+        %out%[%len%] = %byte%(%s%, %p%)
+        %p% = %p% + 1
+      else
+        local %b1% = %byte%(%s%, %p%)
+        local %b2% = %byte%(%s%, %p% + 1)
+        %p% = %p% + 2
+        local %dist% = %b1% + math.floor(%b2% / 16) * 256 + 1
+        for %k% = 1, %b2% % 16 + 3 do
+          %len% = %len% + 1
+          %out%[%len%] = %out%[%len% - %dist%]
+        end
+      end
+    end
+  end
+  local %chars% = {}
+  for %i% = 1, %n% do %chars%[%i%] = %char%(%out%[%i%]) end
+  return %concat%(%chars%)
+end
+
 -- Lazy proto decode, called by the engine the first time a proto runs. The
--- blob is decrypted and unpacked into instructions. The decoded tuples are
--- hashed and compared with the proto's stored hash (field i) before anything
--- can run them; a mismatch leaves no usable opcodes.
+-- blob is decrypted, decompressed and unpacked into instructions. Each record
+-- is 12 bytes of raw fields; seeds are regenerated from the nonce with the
+-- build's Park-Miller step, and the fields are masked with the same formula
+-- the dispatcher inverts. The decoded tuples are hashed and compared with the
+-- proto's stored hash (field i) before anything can run them; a mismatch
+-- leaves no usable opcodes.
 local function %dproto%(%pr%)
   local %pk% = %pkey%(%buildKey%(), %pr%.n)
   if __XS_ANTIDEBUG__ then %adStep%(%pr%.n % 5 + 1) end
-  local %plain% = %decodeK%(%pr%.b, %pk%)
+  local %plain% = %lzd%(%decodeK%(%pr%.b, %pk%))
   local %code% = {}
   local %dh% = 5381
   local function %hm%(%n%) %dh% = (%dh% * 31 + (%n% or 0)) % 2147483647 end
-  for %ci% = 1, math.floor(#%plain% / 15) do
-    local %base% = (%ci% - 1) * 15
+  local %st% = %pr%.n
+  for %ci% = 1, math.floor(#%plain% / 12) do
+    local %base% = (%ci% - 1) * 12
+    %st% = (%st% * 16807) % 2147483647
+    local %sd% = %st% % __XS_FMOD__
+    local %mk% = %sd% * __XS_FM1__
     local %f% = {}
-    for %fi% = 1, 5 do
+    for %fi% = 1, 4 do
       local %o% = %base% + (%fi% - 1) * 3
-      %f%[%fi%] = %byte%(%plain%, %o% + 1) * 65536 + %byte%(%plain%, %o% + 2) * 256 + %byte%(%plain%, %o% + 3)
+      local %v% = %byte%(%plain%, %o% + 1) * 65536 + %byte%(%plain%, %o% + 2) * 256 + %byte%(%plain%, %o% + 3)
+      %f%[%fi%] = (%v% + (%mk% + %fi% * __XS_FM2__) % __XS_FMOD__) % __XS_FMOD__
     end
+    %f%[5] = %sd%
     %hm%(%f%[5]); %hm%(%f%[1]); %hm%(%f%[2]); %hm%(%f%[3]); %hm%(%f%[4])
     %code%[%ci%] = %f%
   end

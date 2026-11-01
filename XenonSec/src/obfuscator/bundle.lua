@@ -315,13 +315,79 @@ local function buildBundle(mod, opts)
     return out
   end
 
-  local function packInstr(eop, ea, eb, ec, seed)
+  -- Each instruction is stored as four raw 3-byte fields (opcode, a, b, c):
+  -- 12 bytes, down from 15. Seeds are not stored; the runtime regenerates
+  -- them from the proto's nonce with the same Park-Miller step as below.
+  local function packRecord(vals)
     local parts = {}
-    for _, v in ipairs({ eop, ea, eb, ec, seed }) do
+    for _, v in ipairs(vals) do
       parts[#parts + 1] = string.char(math.floor(v / 65536) % 256,
                                       math.floor(v / 256) % 256, v % 256)
     end
     return table.concat(parts)
+  end
+
+  -- LZSS over the raw record bytes. Layout: 4-byte big-endian raw length,
+  -- then groups of one flag byte plus up to eight tokens (flag bit set =
+  -- match). A literal is 1 byte; a match is 2 bytes holding a 12-bit
+  -- distance-1 and a 4-bit length-3 (lengths 3..18, window 4096). Arithmetic
+  -- only, so the runtime decoder (%lzd% in the header) needs no bit ops.
+  local function lzCompress(s)
+    local n = #s
+    local out = { string.char(math.floor(n / 16777216) % 256, math.floor(n / 65536) % 256,
+                              math.floor(n / 256) % 256, n % 256) }
+    local heads = {}
+    local tokens = {}
+    local pos = 1
+    while pos <= n do
+      local bestLen, bestDist = 0, 0
+      if pos + 2 <= n then
+        local list = heads[s:sub(pos, pos + 2)]
+        if list then
+          for k = #list, math.max(1, #list - 63), -1 do
+            local cand = list[k]
+            if pos - cand > 4096 then break end
+            local l = 0
+            while l < 18 and pos + l <= n and s:byte(cand + l) == s:byte(pos + l) do
+              l = l + 1
+            end
+            if l > bestLen then bestLen, bestDist = l, pos - cand end
+          end
+        end
+      end
+      local adv
+      if bestLen >= 3 then
+        local d1 = bestDist - 1
+        tokens[#tokens + 1] = { match = true,
+          text = string.char(d1 % 256, math.floor(d1 / 256) * 16 + (bestLen - 3)) }
+        adv = bestLen
+      else
+        tokens[#tokens + 1] = { match = false, text = string.char(s:byte(pos)) }
+        adv = 1
+      end
+      for p = pos, pos + adv - 1 do
+        if p + 2 <= n then
+          local key = s:sub(p, p + 2)
+          heads[key] = heads[key] or {}
+          table.insert(heads[key], p)
+        end
+      end
+      pos = pos + adv
+    end
+    local i = 1
+    while i <= #tokens do
+      local flag, chunk = 0, {}
+      for bit = 0, 7 do
+        local t = tokens[i + bit]
+        if not t then break end
+        if t.match then flag = flag + 2 ^ bit end
+        chunk[#chunk + 1] = t.text
+      end
+      out[#out + 1] = string.char(math.floor(flag))
+      out[#out + 1] = table.concat(chunk)
+      i = i + 8
+    end
+    return table.concat(out)
   end
 
   -- Lua string literal with bytes >= 128 written as decimal escapes, so the
@@ -341,21 +407,24 @@ local function buildBundle(mod, opts)
 
     local plain = {}
     local ih = 5381
+    local seedState = nonce
     for _, instr in ipairs(proto.code) do
-      local seed = math.random(0, MOD - 1)
+      -- Park-Miller step; the runtime repeats this exact sequence.
+      seedState = (seedState * 16807) % 2147483647
+      local seed = seedState % MOD
       local group = opGroups[instr.op]
       local opn = group[math.random(1, #group)]
       local a = instr.a or 0
       local b = instr.b or 0
       local c = instr.c or 0
+      plain[#plain + 1] = packRecord({ opn, a, b, c })
       local eop, ea = encodeField(opn, seed, 1), encodeField(a, seed, 2)
       local eb, ec = encodeField(b, seed, 3), encodeField(c, seed, 4)
-      plain[#plain + 1] = packInstr(eop, ea, eb, ec, seed)
       -- Same order the runtime hashes decoded tuples: seed, op, a, b, c.
       ih = mixChecksum(ih, seed); ih = mixChecksum(ih, eop); ih = mixChecksum(ih, ea)
       ih = mixChecksum(ih, eb); ih = mixChecksum(ih, ec)
     end
-    local blob = cipherEncrypt(table.concat(plain), deriveProtoKey(nonce))
+    local blob = cipherEncrypt(lzCompress(table.concat(plain)), deriveProtoKey(nonce))
 
     -- Integrity: the nonce and every ciphertext byte are covered, in the same
     -- order the runtime's %verify% and %vp% use.
