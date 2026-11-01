@@ -185,7 +185,10 @@ local function %run%(%mod%, ...)
       %PERIODIC%
       %ADCHECK%
       %h%(%F%, %ins%)
-      if %F%.%fin% then return %unpack%(%F%.%ret%, 1, %F%.%ret%.n) end
+      if %F%.%fin% then
+        if %F%.%rn% then return %F%.%rv% end
+        return %unpack%(%F%.%ret%, 1, %F%.%ret%.n)
+      end
     end
   end
 
