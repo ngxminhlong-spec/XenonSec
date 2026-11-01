@@ -316,3 +316,21 @@ end
 
 print()
 print(pass .. " / " .. total .. " pass-level tests passed")
+
+do
+  -- LZMA codec round trip: empty, tiny, runs, random bytes, record-like data.
+  local Lzma = req("obfuscator/lzma.lua")
+  local seed = 12345
+  local function rnd(n) seed = (seed * 16807) % 2147483647; return seed % n end
+  local recs = {}
+  for i = 1, 3000 do recs[#recs + 1] = string.char(rnd(16), rnd(8), 0, rnd(4), 0, 0) end
+  local rand = {}
+  for i = 1, 4000 do rand[i] = string.char(rnd(256)) end
+  local cases = { "", "a", "ab", string.rep("x", 5000), string.rep("abcabcabd", 300),
+                  table.concat(rand), table.concat(recs) }
+  local allOk = true
+  for _, s in ipairs(cases) do
+    if Lzma.decompress(Lzma.compress(s)) ~= s then allOk = false end
+  end
+  check("LZMA codec round-trips every case", allOk)
+end

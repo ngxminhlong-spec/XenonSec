@@ -8,6 +8,7 @@ local load = dofile(dir .. "loader.lua")
 local _crypto = load("crypto")
 local cipherEncrypt = _crypto.cipherEncrypt
 local CIPHER = _crypto.CIPHER
+local lzmaCompress = load("lzma").compress
 local _opcodes = load("opcodes")
 local BINOP_SYMBOLS, OPCODES, UNOP_SYMBOLS, constField = _opcodes.BINOP_SYMBOLS, _opcodes.OPCODES, _opcodes.UNOP_SYMBOLS, _opcodes.constField
 local _util = load("util")
@@ -380,19 +381,33 @@ local function buildBundle(mod, opts)
     checksum = mixChecksum(checksum, hasV)
     local psum = mixChecksum(5381, hasV)
 
-    local plain = {}
+    -- Raw records: four 3-byte fields (opcode alias, a, b, c). Masks are not
+    -- stored; the runtime rebuilds them from the nonce, so the records compress.
+    local function packRecord(vals)
+      local parts = {}
+      for _, v in ipairs(vals) do
+        v = v % MOD
+        parts[#parts + 1] = string.char(math.floor(v / 65536) % 256,
+                                        math.floor(v / 256) % 256, v % 256)
+      end
+      return table.concat(parts)
+    end
+    local raw = {}
     local ih = 5381
     local cur = 0 -- decode state seen by the next instruction
+    local seedState = nonce
     for _, instr in ipairs(proto.code) do
-      local seed = math.random(0, MOD - 1)
+      -- Park-Miller seed stream from the nonce; the runtime repeats this exactly.
+      seedState = (seedState * 16807) % 2147483647
+      local seed = seedState % MOD
       local group = opGroups[instr.op]
       local opn = group[math.random(1, #group)]
       local a = instr.a or 0
       local b = instr.b or 0
       local c = instr.c or 0
+      raw[#raw + 1] = packRecord({ opn, a, b, c })
       local eop, ea = encodeField(opn, seed, 1, cur), encodeField(a, seed, 2, cur)
       local eb, ec = encodeField(b, seed, 3, cur), encodeField(c, seed, 4, cur)
-      plain[#plain + 1] = packInstr(eop, ea, eb, ec, seed)
       -- Same order the runtime hashes decoded tuples: seed, op, a, b, c.
       ih = mixChecksum(ih, seed); ih = mixChecksum(ih, eop); ih = mixChecksum(ih, ea)
       ih = mixChecksum(ih, eb); ih = mixChecksum(ih, ec)
@@ -400,7 +415,7 @@ local function buildBundle(mod, opts)
       -- alias or seed never changes the state a running frame expects.
       if STATE_RESET[instr.op] then cur = 0 else cur = (cur * stepA + OPNUM[instr.op] * stepB + stepC) % MOD end
     end
-    local blob = cipherEncrypt(table.concat(plain), deriveProtoKey(nonce))
+    local blob = cipherEncrypt(lzmaCompress(table.concat(raw)), deriveProtoKey(nonce))
 
     -- Integrity: the nonce and every ciphertext byte are covered, in the same
     -- order the runtime's %verify% and %vp% use.
@@ -422,10 +437,10 @@ local function buildBundle(mod, opts)
     end
     checksum = mixChecksum(checksum, psum)
     protoLits[#protoLits + 1] = string.format(
-      "{p={%s},v=%s,k=%d,n=%d,i=%d,b=%s}",
+      "{p={%s},v=%s,k=%d,n=%d,i=%d,r=%d,b=%s}",
       table.concat(paramParts, ","),
       proto.hasVararg and "true" or "false",
-      psum, nonce, ih, luaBytes(blob)
+      psum, nonce, ih, #table.concat(raw), luaBytes(blob)
     )
   end
   checksum = keyedFinal(checksum, key)

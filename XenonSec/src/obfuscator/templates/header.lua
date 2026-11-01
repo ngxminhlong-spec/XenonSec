@@ -223,29 +223,147 @@ local function %pkey%(%key%, %nn%)
   return %pko%
 end
 
+-- LZMA-style decoder for the proto records; mirrors Lzma.decompress in
+-- src/obfuscator/lzma.lua. Same range coder and bit models, arithmetic only.
+local function %lzd%(%z%, %maxn%)
+  local %n% = %byte%(%z%, 1) * 16777216 + %byte%(%z%, 2) * 65536 + %byte%(%z%, 3) * 256 + %byte%(%z%, 4)
+  -- A tampered blob can claim any length; the stored raw length bounds the work.
+  if %n% > %maxn% then return "" end
+  local %p% = 5
+  local %rg% = 4294967295
+  local %cd% = 0
+  local function %nx%()
+    local %b% = %byte%(%z%, %p%) or 0
+    %p% = %p% + 1
+    return %b%
+  end
+  for _ = 1, 5 do %cd% = %cd% * 256 + %nx%() end
+  local function %norm%()
+    while %rg% < 16777216 do
+      %rg% = %rg% * 256
+      %cd% = %cd% * 256 + %nx%()
+    end
+  end
+  local function %bit%(%pb%, %ix%)
+    local %pr% = %pb%[%ix%]
+    local %bd% = math.floor(%rg% / 2048) * %pr%
+    local %bt% = 0
+    if %cd% < %bd% then
+      %rg% = %bd%
+      %pb%[%ix%] = %pr% + math.floor((2048 - %pr%) / 32)
+    else
+      %cd% = %cd% - %bd%
+      %rg% = %rg% - %bd%
+      %pb%[%ix%] = %pr% - math.floor(%pr% / 32)
+      %bt% = 1
+    end
+    %norm%()
+    return %bt%
+  end
+  local function %tree%(%pb%, %nb%)
+    local %m% = 1
+    for _ = 1, %nb% do %m% = %m% * 2 + %bit%(%pb%, %m%) end
+    return %m% - 2 ^ %nb%
+  end
+  local function %direct%(%nb%)
+    local %v% = 0
+    for _ = 1, %nb% do
+      %rg% = math.floor(%rg% / 2)
+      local %bt% = 0
+      if %cd% >= %rg% then %cd% = %cd% - %rg%; %bt% = 1 end
+      %v% = %v% * 2 + %bt%
+      %norm%()
+    end
+    return %v%
+  end
+  local function %probs%(%k%)
+    local t = {}
+    for i = 1, %k% do t[i] = 1024 end
+    return t
+  end
+  local %isM% = %probs%(12)
+  local %lit% = %probs%(256)
+  local %lc% = %probs%(2)
+  local %ll% = %probs%(16)
+  local %lm% = %probs%(16)
+  local %lh% = %probs%(256)
+  local %ps% = { %probs%(64), %probs%(64), %probs%(64), %probs%(64) }
+  local %out% = {}
+  local %cnt% = 0
+  local %lzs% = 0
+  while %cnt% < %n% do
+    if %bit%(%isM%, %lzs% + 1) == 0 then
+      %cnt% = %cnt% + 1
+      %out%[%cnt%] = %tree%(%lit%, 8)
+      if %lzs% < 4 then %lzs% = 0 elseif %lzs% < 10 then %lzs% = %lzs% - 3 else %lzs% = %lzs% - 6 end
+    else
+      local len
+      if %bit%(%lc%, 1) == 0 then len = %tree%(%ll%, 3) + 2
+      elseif %bit%(%lc%, 2) == 0 then len = %tree%(%lm%, 3) + 10
+      else len = %tree%(%lh%, 8) + 18 end
+      local slot = %tree%(%ps%[math.min(len - 2, 3) + 1], 6)
+      local d
+      if slot < 4 then
+        d = slot
+      else
+        local nd = math.floor(slot / 2) - 1
+        d = (2 + slot % 2) * 2 ^ nd + %direct%(nd)
+      end
+      local dist = d + 1
+      for _ = 1, len do
+        %cnt% = %cnt% + 1
+        %out%[%cnt%] = %out%[%cnt% - dist]
+      end
+      if %lzs% < 7 then %lzs% = 7 else %lzs% = 10 end
+    end
+  end
+  local %parts% = {}
+  for i = 1, %cnt% do %parts%[i] = string.char(%out%[i]) end
+  return table.concat(%parts%)
+end
+
 -- Lazy proto decode, called by the engine the first time a proto runs. The
--- blob is decrypted and unpacked into instructions. The decoded tuples are
--- hashed and compared with the proto's stored hash (field i) before anything
--- can run them; a mismatch leaves no usable opcodes.
+-- blob is decrypted and decompressed to raw records. The masked tuples are
+-- rebuilt here exactly as the build made them: seeds come from the nonce, and
+-- the decode state is replayed along the code. The rebuilt tuples are checked
+-- against the stored hash (field i) before anything can run them.
 local function %dproto%(%pr%)
   local %pk% = %pkey%(%buildKey%(), %pr%.n)
-  if __XS_ANTIDEBUG__ then %adStep%(%pr%.n % 5 + 1) end
-  local %plain% = %decodeK%(%pr%.b, %pk%)
+  local %raw% = %lzd%(%decodeK%(%pr%.b, %pk%), %pr%.r)
   local %code% = {}
   local %dh% = 5381
   local function %hm%(%n%) %dh% = (%dh% * 31 + (%n% or 0)) % 2147483647 end
-  for %ci% = 1, math.floor(#%plain% / 15) do
-    local %base% = (%ci% - 1) * 15
-    local %f% = {}
-    for %fi% = 1, 5 do
-      local %o% = %base% + (%fi% - 1) * 3
-      %f%[%fi%] = %byte%(%plain%, %o% + 1) * 65536 + %byte%(%plain%, %o% + 2) * 256 + %byte%(%plain%, %o% + 3)
-    end
-    %hm%(%f%[5]); %hm%(%f%[1]); %hm%(%f%[2]); %hm%(%f%[3]); %hm%(%f%[4])
-    %code%[%ci%] = %f%
+  local %canon% = __XS_CANONH__
+  local %rst% = __XS_RESETH__
+  local %sd% = %pr%.n
+  local %cur% = 0
+  local function %fld%(%base%, %j%)
+    local %o% = %base% + (%j% - 1) * 3
+    return %byte%(%raw%, %o% + 1) * 65536 + %byte%(%raw%, %o% + 2) * 256 + %byte%(%raw%, %o% + 3)
+  end
+  local function %ef%(%v%, %seed%, %slot%, %st%)
+    return (%v% + (%seed% * __XS_FM1__ + %slot% * __XS_FM2__ + %st% * __XS_FM3__) % __XS_FMOD__) % __XS_FMOD__
+  end
+  for %ci% = 1, math.floor(#%raw% / 12) do
+    local %base% = (%ci% - 1) * 12
+    local %opn% = %fld%(%base%, 1)
+    local %a% = %fld%(%base%, 2)
+    local %b% = %fld%(%base%, 3)
+    local %c% = %fld%(%base%, 4)
+    %sd% = (%sd% * 16807) % 2147483647
+    local %seed% = %sd% % __XS_FMOD__
+    local %ca% = %canon%[%opn%] or %opn%
+    local %e1% = %ef%(%opn%, %seed%, 1, %cur%)
+    local %e2% = %ef%(%a%, %seed%, 2, %cur%)
+    local %e3% = %ef%(%b%, %seed%, 3, %cur%)
+    local %e4% = %ef%(%c%, %seed%, 4, %cur%)
+    %code%[%ci%] = { %e1%, %e2%, %e3%, %e4%, %seed% }
+    %hm%(%seed%); %hm%(%e1%); %hm%(%e2%); %hm%(%e3%); %hm%(%e4%)
+    if %rst%[%ca%] then %cur% = 0 else %cur% = (%cur% * __XS_STA__ + %ca% * __XS_STB__ + __XS_STC__) % __XS_FMOD__ end
   end
   if %dh% ~= %pr%.i then
     for %ci% = 1, #%code% do %code%[%ci%][1] = nil end
+    %code%[#%code% + 1] = {}
   end
   return %code%
 end

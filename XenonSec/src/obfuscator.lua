@@ -227,6 +227,25 @@ local function obfuscateOnce(source, chunkname, opts)
   header = header:gsub("__XS_LM__", tostring(CIPHER.mult))
   header = header:gsub("__XS_LA__", tostring(CIPHER.add))
   header = header:gsub("__XS_RM__", tostring(CIPHER.rcMult))
+  header = header:gsub("__XS_FMOD__", tostring(bundle.mod))
+  header = header:gsub("__XS_FM1__", tostring(bundle.saltM1))
+  header = header:gsub("__XS_FM2__", tostring(bundle.saltM2))
+  header = header:gsub("__XS_FM3__", tostring(bundle.saltM3))
+  header = header:gsub("__XS_STA__", tostring(bundle.stepA))
+  header = header:gsub("__XS_STB__", tostring(bundle.stepB))
+  header = header:gsub("__XS_STC__", tostring(bundle.stepC))
+  do
+    -- alias -> canonical opcode, and the canonical opcodes that reset the state
+    local canonParts, resetParts = {}, {}
+    for _, group in pairs(bundle.opGroups) do
+      for _, k in ipairs(group) do canonParts[#canonParts + 1] = string.format("[%d]=%d", k, group[1]) end
+    end
+    for _, name in ipairs({ "JMP", "JF", "JT", "JNIL", "RET", "RETM" }) do
+      if bundle.OPNUM[name] then resetParts[#resetParts + 1] = string.format("[%d]=true", bundle.OPNUM[name]) end
+    end
+    header = header:gsub("__XS_CANONH__", "{" .. table.concat(canonParts, ",") .. "}")
+    header = header:gsub("__XS_RESETH__", "{" .. table.concat(resetParts, ",") .. "}")
+  end
   header = header:gsub("__XS_MASKA__", tostring(bundle.maskA))
   header = header:gsub("__XS_CIPHERS__", (ciphersLit:gsub("%%", "%%%%")))
   header = header:gsub("__XS_PROTOS__", (protosLit:gsub("%%", "%%%%")))
