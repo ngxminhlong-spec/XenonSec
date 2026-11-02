@@ -89,8 +89,9 @@ function Parser:skipTypeExpr()
 				if depth == 0 then break end
 				depth = depth - 1; self:advance()
 			elseif v == ">" then
-				if depth == 0 and not lastWasMinus then break end
-				if depth > 0 then depth = depth - 1 end
+				if lastWasMinus then -- `->` arrow of a function type: not a generic closer
+						elseif depth == 0 then break end
+				if depth > 0 and not lastWasMinus then depth = depth - 1 end
 				self:advance()
 			elseif depth == 0 and (v == "," or v == "=" or v == ";") then
 				break
@@ -111,7 +112,10 @@ function Parser:skipTypeExpr()
 				self:advance() -- e.g. `nil` as a literal type
 			end
 		else
-			self:advance() -- name/number/string content of the type
+			-- A `type Name` pair at depth 0 begins the next alias statement: stop before it.
+				local nxt = self:lookahead(1)
+				if depth == 0 and t.value == "type" and nxt and nxt.type == "name" then break end
+				self:advance() -- name/number/string content of the type
 		end
 		lastWasMinus = isMinus
 	end
@@ -546,6 +550,12 @@ function Parser:parseExpr(limit)
 	end
 	while true do
 		local t = self:cur()
+		-- Luau type assertion `e :: T`: no runtime effect, so only the type is skipped.
+		local nx = self:lookahead(1)
+		if self.luau and self:isSym(":") and nx and nx.type == "symbol" and nx.value == ":" then
+			self:advance(); self:advance(); self:skipTypeExpr()
+		end
+		t = self:cur()
 		local op = tokBinOp(t)
 		if not op or BINPRI[op][1] <= limit then break end
 		self:advance()
@@ -716,7 +726,7 @@ function Parser:parseSuffixedExpr()
 			local key = self:parseExpr()
 			self:checkSym("]")
 			expr = { kind = "Index", obj = expr, key = key, line = t.line }
-		elseif t.type == "symbol" and t.value == ":" then
+		elseif t.type == "symbol" and t.value == ":" and not (self.luau and self:lookahead(1) and self:lookahead(1).value == ":") then
 			self:advance()
 			local method = self:checkName()
 			local args = self:parseArgs()
