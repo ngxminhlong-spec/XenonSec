@@ -9,6 +9,7 @@ local _opcodes = load("opcodes")
 local BINOP_SYMBOLS, UNOP_SYMBOLS = _opcodes.BINOP_SYMBOLS, _opcodes.UNOP_SYMBOLS
 local _predicates = load("predicates")
 local genAlwaysFalsePredicate, genOpaquePredicate = _predicates.genAlwaysFalsePredicate, _predicates.genOpaquePredicate
+local numExpr = load("util").numExpr
 
 local function shuffleLines(lines)
   for i = #lines, 2, -1 do
@@ -60,8 +61,8 @@ local function genDecoyHandlers(ensureName, count, probeExpr, freeKey)
         tv, F, regsF, F, x3, F, regsF, F, x2, tv)
     end,
     function(key)
-      return string.format("local r = %s.%s; r[%s.%s] = %s[%d](r[%s.%s], r[%s.%s])",
-        F, regsF, F, x2, BINOPS, key, F, x3, F, x4)
+      return string.format("local r = %s.%s; r[%s.%s] = %s[%s](r[%s.%s], r[%s.%s])",
+        F, regsF, F, x2, BINOPS, numExpr(key), F, x3, F, x4)
     end,
   }
 
@@ -71,8 +72,8 @@ local function genDecoyHandlers(ensureName, count, probeExpr, freeKey)
     local cond = genAlwaysFalsePredicate(probeExpr())
     local body = flavors[math.random(1, #flavors)](key)
     lines[#lines + 1] = string.format(
-      "%s[%d] = function(%s, %s) if not (%s) then error() end %s %s.%s = %s.%s + 1 end",
-      H, key, F, ins, cond, body, F, ip, F, ip)
+      "%s[%s] = function(%s, %s) if not (%s) then error() end %s %s.%s = %s.%s + 1 end",
+      H, numExpr(key), F, ins, cond, body, F, ip, F, ip)
   end
   return table.concat(shuffleLines(lines), "\n")
 end
@@ -89,23 +90,23 @@ local function genOpHandlers(ensureName, probeExpr, OPNUM, BINNUM, UNNUM)
   local function handler(opnum, body)
     local gate = genOpaquePredicate(probeExpr(), 3)
     lines[#lines + 1] = string.format(
-      "%s[%d] = function(%s, %s) if not (%s) then error() end %s %s.%s = %s.%s + 1 end",
-      H, opnum, F, ins, gate, body, F, ipF, F, ipF)
+      "%s[%s] = function(%s, %s) if not (%s) then error() end %s %s.%s = %s.%s + 1 end",
+      H, numExpr(opnum), F, ins, gate, body, F, ipF, F, ipF)
   end
   for k, sym in ipairs(BINOP_SYMBOLS) do
     local num = BINNUM[sym]
     handler(OPNUM["BIN" .. k], string.format(
-      "local r = %s.%s; r[%s.%s] = %s[%d](r[%s.%s], r[%s.%s]);",
-      F, regsF, F, x2, BINOPS, num, F, x3, F, x4))
+      "local r = %s.%s; r[%s.%s] = %s[%s](r[%s.%s], r[%s.%s]);",
+      F, regsF, F, x2, BINOPS, numExpr(num), F, x3, F, x4))
     handler(OPNUM["BINK" .. k], string.format(
-      "local r = %s.%s; r[%s.%s] = %s[%d](r[%s.%s], %s(%s, %s.%s, %s.%s));",
-      F, regsF, F, x2, BINOPS, num, F, x3, cgetN, consts, F, x4, F, stF))
+      "local r = %s.%s; r[%s.%s] = %s[%s](r[%s.%s], %s(%s, %s.%s, %s.%s));",
+      F, regsF, F, x2, BINOPS, numExpr(num), F, x3, cgetN, consts, F, x4, F, stF))
   end
   for k, sym in ipairs(UNOP_SYMBOLS) do
     local num = UNNUM[sym]
     handler(OPNUM["UN" .. k], string.format(
-      "local r = %s.%s; r[%s.%s] = %s[%d](r[%s.%s]);",
-      F, regsF, F, x2, UNOPS, num, F, x3))
+      "local r = %s.%s; r[%s.%s] = %s[%s](r[%s.%s]);",
+      F, regsF, F, x2, UNOPS, numExpr(num), F, x3))
   end
   return table.concat(shuffleLines(lines), "\n")
 end

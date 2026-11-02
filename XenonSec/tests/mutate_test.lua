@@ -119,6 +119,7 @@ do
   -- Equivalent-opcode groups list every key of an opcode: [k] = {...}.
   for k in out:gmatch("%[(%d+)%]%s*=%s*{[%d,%s]*}") do take(k) end
   for k in out:gmatch("%[%(%((%d+)%+%d+%)%-%d+%)%]%s*=%s*function%(") do take(k) end
+  for k in out:gmatch("%[%(%((%d+)%+%d+%)%-%d+%)%]%s*=%s*{[%d,%s]*}") do take(k) end
   check("literal handler keys stay inside the dense pool bound",
     count > 0 and maxKey <= count + 28 + 56, ("literal keys=%d largest=%d"):format(count, maxKey))
 end

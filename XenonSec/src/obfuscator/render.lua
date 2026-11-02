@@ -11,6 +11,7 @@ local _predicates = load("predicates")
 local genOpaquePredicate = _predicates.genOpaquePredicate
 local _util = load("util")
 local randomIdent, substitute, shuffledRange = _util.randomIdent, _util.substitute, _util.shuffledRange
+local numExpr = _util.numExpr
 
 -- Handler self-test. Runs each simple handler against a synthetic frame with
 -- known inputs and checks the frame it leaves behind. Numbers are written as
@@ -119,17 +120,19 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
     for _, name in ipairs(names) do
       local g = groups[name]
       local list = {}
+      -- Group members are listed as plain values: the list repeats in every
+      -- entry of the group, so masking it would grow the output quadratically.
       for i, k in ipairs(g) do list[#list + 1] = tostring(k) end
       for i, k in ipairs(g) do
-        if i > 1 then stmts[#stmts + 1] = string.format("%s[%d] = %s[%d]", H, k, H, g[1]) end
-        tbl[#tbl + 1] = string.format("[%d] = {%s}", k, table.concat(list, ", "))
+        if i > 1 then stmts[#stmts + 1] = string.format("%s[%s] = %s[%s]", H, numExpr(k), H, numExpr(g[1])) end
+        tbl[#tbl + 1] = string.format("[%s] = {%s}", numExpr(k), table.concat(list, ", "))
         -- Canonical opcode of every alias: the first key of its group (OPNUM).
-        canonTbl[#canonTbl + 1] = string.format("[%d] = %d", k, g[1])
+        canonTbl[#canonTbl + 1] = string.format("[%s] = %s", numExpr(k), numExpr(g[1]))
       end
     end
     local resetList = {}
     for _, name in ipairs({ "JMP", "JF", "JT", "JNIL", "RET", "RETM" }) do
-      if OPNUM[name] then resetList[#resetList + 1] = string.format("[%d] = true", OPNUM[name]) end
+      if OPNUM[name] then resetList[#resetList + 1] = string.format("[%s] = true", numExpr(OPNUM[name])) end
     end
     local M, M1, M2, M3 = tostring(KV.MOD), tostring(KV.M1), tostring(KV.M2), tostring(KV.M3)
     local SA, SB, SC = tostring(KV.SA), tostring(KV.SB), tostring(KV.SC)

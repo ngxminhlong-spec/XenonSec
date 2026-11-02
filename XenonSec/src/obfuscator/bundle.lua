@@ -9,6 +9,7 @@ local _crypto = load("crypto")
 local cipherEncrypt = _crypto.cipherEncrypt
 local CIPHER = _crypto.CIPHER
 local lzmaCompress = load("lzma").compress
+local numExpr = load("util").numExpr
 
 -- Base85 for the proto blobs. The alphabet is the printable ASCII range
 -- 35..120 without the backslash (92), so the text needs no Lua escapes. The
@@ -421,7 +422,7 @@ local function buildBundle(mod, opts)
   for i, c in ipairs(cipherConsts) do
     if escSet[i] then
       cipherText[i] = ""
-      escEntries[#escEntries + 1] = string.format("[%d]=%s", i, escapeLiteral(c))
+      escEntries[#escEntries + 1] = string.format("[%s]=%s", numExpr(i), escapeLiteral(c))
     else
       cipherText[i] = encodeB85(c)
     end

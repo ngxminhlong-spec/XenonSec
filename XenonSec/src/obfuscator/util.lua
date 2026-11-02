@@ -78,9 +78,17 @@ local function minifyTemplateText(text)
   return minifyMod.minify(text, true)
 end
 
+-- Writes an integer as arithmetic with a fresh key, so the literal itself
+-- never appears in the generated code (table keys, indexes, opcode numbers).
+local function numExpr(n)
+  local k = math.random(1000, 99999)
+  return string.format("((%d+%d)-%d)", n, k, k)
+end
+
 return {
   byteXor = byteXor,
   minifyTemplateText = minifyTemplateText,
+  numExpr = numExpr,
   randomByteKey = randomByteKey,
   randomIdent = randomIdent,
   shuffledRange = shuffledRange,

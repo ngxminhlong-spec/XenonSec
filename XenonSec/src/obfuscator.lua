@@ -33,6 +33,7 @@ local CIPHER, setCipherParams = _crypto.CIPHER, _crypto.setCipherParams
 local renderTemplate = _render.renderTemplate
 local buildStdBlock, encName, rewriteStd = _stdlib.buildStdBlock, _stdlib.encName, _stdlib.rewriteStd
 local minifyTemplateText, randomIdent, substitute = _util.minifyTemplateText, _util.randomIdent, _util.substitute
+local numExpr = _util.numExpr
 local FOOTER_TEMPLATE = load("templates/footer")
 local HEADER_TEMPLATE = load("templates/header")
 local ANTIDEBUG_TEMPLATE = load("templates/antidebug")
@@ -212,7 +213,7 @@ local function obfuscateOnce(source, chunkname, opts)
   -- the header fills at startup (see rewriteStd / buildStdBlock).
   local stdTab = resolveShared("stdtab")
   local stdList, stdIndex = {}, {}
-  local stdSalt = math.random(1, 200)
+  _stdlib.resetSeeds()
   local stdNames = {
     G = resolveShared("stdG"), dec = resolveShared("stdDec"), t = resolveShared("stdT"),
     o = resolveShared("stdO"), j = resolveShared("stdJ"),
@@ -232,7 +233,7 @@ local function obfuscateOnce(source, chunkname, opts)
   header = header:gsub("__XS_TAGZ__", tostring(bundle.tagZ))
   header = header:gsub("__XS_TAGNAN__", tostring(bundle.tagNaN))
   for nm, idx in pairs(bundle.antiIdx) do
-    header = header:gsub("__XS_NM_" .. nm:upper() .. "__", tostring(idx))
+    header = header:gsub("__XS_NM_" .. nm:upper() .. "__", numExpr(idx))
   end
   header = header:gsub("__XS_SB__", tostring(CIPHER.basis))
   header = header:gsub("__XS_LM__", tostring(CIPHER.mult))
@@ -249,10 +250,10 @@ local function obfuscateOnce(source, chunkname, opts)
     -- alias -> canonical opcode, and the canonical opcodes that reset the state
     local canonParts, resetParts = {}, {}
     for _, group in pairs(bundle.opGroups) do
-      for _, k in ipairs(group) do canonParts[#canonParts + 1] = string.format("[%d]=%d", k, group[1]) end
+      for _, k in ipairs(group) do canonParts[#canonParts + 1] = string.format("[%s]=%s", numExpr(k), numExpr(group[1])) end
     end
     for _, name in ipairs({ "JMP", "JF", "JT", "JNIL", "RET", "RETM" }) do
-      if bundle.OPNUM[name] then resetParts[#resetParts + 1] = string.format("[%d]=true", bundle.OPNUM[name]) end
+      if bundle.OPNUM[name] then resetParts[#resetParts + 1] = string.format("[%s]=true", numExpr(bundle.OPNUM[name])) end
     end
     header = header:gsub("__XS_CANONH__", "{" .. table.concat(canonParts, ",") .. "}")
     header = header:gsub("__XS_RESETH__", "{" .. table.concat(resetParts, ",") .. "}")
@@ -266,10 +267,10 @@ local function obfuscateOnce(source, chunkname, opts)
   header = header:gsub("__XS_CHECKSUM__", tostring(bundle.checksum))
   header = header:gsub("__XS_ANTITAMPER_ON__", tostring(opts.antiTamper))
   header = header:gsub("__XS_ANTIDEBUG__", tostring(opts.antiDebug))
-  header = header:gsub("__XS_WMIDX__", tostring(bundle.watermarkIdx))
-  header = header:gsub("__XS_DECMAIN__", tostring(bundle.decMain))
+  header = header:gsub("__XS_WMIDX__", numExpr(bundle.watermarkIdx))
+  header = header:gsub("__XS_DECMAIN__", numExpr(bundle.decMain))
   header = header:gsub("__XS_GROOT__", function() return resolveShared("stdG") end)
-  header = header:gsub("__XS_NSTATIC__", tostring(bundle.nStatic))
+  header = header:gsub("__XS_NSTATIC__", numExpr(bundle.nStatic))
   -- Built here, after resolveShared exists, so the corrupt() helper is
   -- emitted under its renamed identifier like everything else in the header.
   -- Live getters for the standard builtins (see %LIVE% in the header).
@@ -282,7 +283,7 @@ local function obfuscateOnce(source, chunkname, opts)
       if seen[name] then return end
       seen[name] = true
       parts[#parts + 1] = string.format("[%s] = function() return %s end",
-        encName(stdNames, stdSalt, name), name)
+        encName(stdNames, name), name)
     end
     for _, name in ipairs(ENV_CHECK_NAMES) do add(name) end
     for _, name in ipairs(bundle.liveNames) do add(name) end
@@ -311,9 +312,9 @@ local function obfuscateOnce(source, chunkname, opts)
   -- Always emitted: the header needs byte/char/concat even when no library
   -- name is referenced directly.
   header = header:gsub("__XS_STD__", function()
-    return buildStdBlock(stdTab, stdList, stdNames, stdSalt)
+    return buildStdBlock(stdTab, stdList, stdNames)
   end)
-  footer = footer:gsub("__XS_MAIN__", tostring(bundle.mainProto))
+  footer = footer:gsub("__XS_MAIN__", numExpr(bundle.mainProto))
 
   -- Wrap the ENTIRE output (header locals: key/decode/consts/protos,
   -- plus the engine call) inside one outer closure, so the finished

@@ -88,10 +88,11 @@ do
   local src = "print('size check')\n"
   local big = Obf.obfuscate(src, "t", { minSize = 100000 })
   check("explicit minSize reaches 100000 bytes", #big >= 100000, "size=" .. #big)
-  -- The runtime LZMA decoder ships as VM bytecode (about 40 KB), so a tiny
-  -- script's build is ~125 KB. The bound below only has to show padding did
-  -- not kick in; it is not a size budget.
-  local PAD_BOUND = 150000
+  -- The runtime LZMA decoder ships as VM bytecode (about 40 KB), and masked
+  -- table keys and indexes add about 25 KB more, so a tiny script's build is
+  -- ~170 KB. The bound below only has to show padding did not kick in; it is
+  -- not a size budget.
+  local PAD_BOUND = 200000
   local dflt = Obf.obfuscate(src, "t", {})
   check("default build is not padded", #dflt < PAD_BOUND, "size=" .. #dflt)
   local small = Obf.obfuscate(src, "t", { minSize = false })

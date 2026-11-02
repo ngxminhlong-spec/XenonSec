@@ -14,6 +14,31 @@
 -- table.concat) stay literal, because the decoder needs them first.
 --------------------------------------------------------------------
 
+local dir = debug.getinfo(1, "S").source:match("@?(.*/)") or "./"
+local load = dofile(dir .. "loader.lua")
+local _util = load("util")
+local numExpr, randomIdent = _util.numExpr, _util.randomIdent
+
+-- Each name is encoded with a keystream seeded per name (see keystream below).
+-- The seeds are chosen once per build, so every reference to a name agrees.
+local seeds = {}
+local function resetSeeds() seeds = {} end
+local function seedFor(s)
+  if not seeds[s] then seeds[s] = math.random(1, 2147483646) end
+  return seeds[s]
+end
+
+-- Keystream: S = S * 16807 mod (2^31 - 1), key byte = floor(S / 65536) % 256.
+-- The runtime decoder runs the same recurrence, so it needs only the seed.
+local function keystream(seed, n)
+  local ks, s = {}, seed
+  for j = 1, n do
+    s = (s * 16807) % 2147483647
+    ks[j] = math.floor(s / 65536) % 256
+  end
+  return ks
+end
+
 local STD_BARE = {
   pairs = true, ipairs = true, next = true, select = true, type = true,
   tonumber = true, tostring = true, error = true, pcall = true, xpcall = true,
@@ -91,7 +116,7 @@ local function rewriteStd(text, tabName, list, index)
           k = #list
           index[path] = k
         end
-        out[#out + 1] = tabName .. "[" .. k .. "]"
+        out[#out + 1] = tabName .. "[" .. numExpr(k) .. "]"
         i = i + #path
       else
         out[#out + 1] = name
@@ -108,18 +133,22 @@ end
 -- Names are stored as (byte + salt) % 256, decoded by `dec` with the
 -- header's own char/concat locals. `names` gives the local identifiers.
 -- Encodes a name as a decode call in the generated code: names.dec({...}).
-local function encName(names, salt, s)
+-- Encodes `s` for the runtime decoder: the bytes plus the masked seed.
+local function encBytes(s)
+  local seed = seedFor(s)
+  local ks = keystream(seed, #s)
   local t = {}
-  for j = 1, #s do t[j] = (s:byte(j) + salt) % 256 end
-  return names.dec .. "({" .. table.concat(t, ",") .. "})"
+  for j = 1, #s do t[j] = (s:byte(j) + ks[j]) % 256 end
+  return "{" .. table.concat(t, ",") .. "}, " .. numExpr(seed)
 end
 
-local function buildStdBlock(tabName, list, names, salt)
-  local function enc(s)
-    local t = {}
-    for j = 1, #s do t[j] = (s:byte(j) + salt) % 256 end
-    return "{" .. table.concat(t, ",") .. "}"
-  end
+local function encName(names, s)
+  return names.dec .. "(" .. encBytes(s) .. ")"
+end
+
+local function buildStdBlock(tabName, list, names)
+  local function enc(s) return encBytes(s) end
+  local seedVar = randomIdent()
   local lines = {}
   -- Root of the lookups: on Lune and some sandboxes _G is an empty table, but
   -- getfenv(0) still reaches the globals; plain Lua has no getfenv, so _G there.
@@ -134,10 +163,11 @@ local function buildStdBlock(tabName, list, names, salt)
     names.ok, names.r, names.pc, names.f, names.ok, names.r, names.char, names.f,
     names.ok, names.r, names.j, names.pc, names.f, names.ok, names.r, names.j, names.byte, names.f)
   -- Name decoder: builds the string byte by byte, so it needs no table library.
+  -- Same recurrence as keystream() above: the state advances once per byte.
   lines[#lines + 1] = string.format(
-    "local function %s(%s) local %s = \"\" for %s = 1, #%s do %s = %s .. %s((%s[%s] - %d) %% 256) end return %s end",
-    names.dec, names.t, names.o, names.j, names.t, names.o, names.o, names.char,
-    names.t, names.j, salt, names.o)
+    "local function %s(%s, %s) local %s = \"\" for %s = 1, #%s do %s = (%s * 16807) %% 2147483647 %s = %s .. %s((%s[%s] - (%s - %s %% 65536) / 65536) %% 256) end return %s end",
+    names.dec, names.t, seedVar, names.o, names.j, names.t, seedVar, seedVar,
+    names.o, names.o, names.char, names.t, names.j, seedVar, seedVar, names.o)
   -- table.concat, resolved through the same encoded lookup as everything else.
   lines[#lines + 1] = string.format("local %s = %s[%s(%s)][%s(%s)]",
     names.concat, names.G, names.dec, enc("table"), names.dec, enc("concat"))
@@ -146,7 +176,7 @@ local function buildStdBlock(tabName, list, names, salt)
     for part in path:gmatch("[^%.]+") do
       expr = expr .. "[" .. names.dec .. "(" .. enc(part) .. ")]"
     end
-    lines[#lines + 1] = string.format("%s[%d] = %s", tabName, k, expr)
+    lines[#lines + 1] = string.format("%s[%s] = %s", tabName, numExpr(k), expr)
   end
   return table.concat(lines, " ")
 end
@@ -154,5 +184,6 @@ end
 return {
   buildStdBlock = buildStdBlock,
   encName = encName,
+  resetSeeds = resetSeeds,
   rewriteStd = rewriteStd,
 }
