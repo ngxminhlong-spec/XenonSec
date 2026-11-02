@@ -293,7 +293,7 @@ suite.
 
 ## Limitations
 
-**Not protection, by design:**
+**What the obfuscation does not protect against:**
 
 - The decode key and the ciphertext are both in the output, so anyone with the
   file can decrypt the constant pool.
@@ -301,31 +301,51 @@ suite.
   dispatch, the register table, and the instruction pointer, whatever they are
   named. Per-build numbering, seeds, and decoys make each build a separate
   analysis job; they do not remove the semantics from the code.
-- Numeric masks are arithmetic, so constant folding by a deobfuscator can undo
-  them.
-- The field-decoding arithmetic is visible in the dispatcher.
-- Some names must stay literal: env-logger checks, live getters, and metamethod
-  keys such as `__index`, because Lua and the runtimes require them.
+- The numeric masks are arithmetic, so constant folding by a deobfuscator can
+  undo them. The field-decoding arithmetic is visible in the dispatcher.
 - The cipher is a custom construction, not a standard or reviewed one. Per-build
   constants remove fixed values, but no cryptographic strength is claimed.
-- Process memory cannot be fully protected in pure Lua. Anything the program
-  needs to run can be observed by dynamic analysis.
+- Anything the program needs to run can be observed by dynamic analysis. Process
+  memory cannot be fully protected in pure Lua, and the cache flush only
+  shortens how long decoded constants stay in memory.
 - This is not a full anti-tamper, anti-debugger, or VM-detection suite. There is
   no self-modifying code. The goal is to raise the cost of casual copy-paste theft.
+- Some names must stay literal because Lua or the runtimes require them: metamethod
+  keys such as `__index`, the env-logger checks, and the live getters.
+
+**Known open issues:**
+
+- `protection_test.lua` fails two checks, "bytecode-check prefix found in the
+  output" and "anti-debug build has the bytecode-hash prefix". These are open
+  issues, not regressions in the current build.
+- The mid-run debugger-attach check is timing-sensitive and can fail
+  intermittently.
+
+**Runtime and Luau gaps:**
+
+- On Lute only, a global the program writes stays private to the program.
+  Modules or host code that read globals through the real environment won't see
+  it. Lune and Lua keep full global semantics.
+- Lune has no `debug` library, so the hook-based anti-debug checks do nothing
+  there. The env-logger check still runs.
+- Luau `__iter` iteration is not handled; tables with `__iter` use the `next`-based
+  default. Attributes on anonymous function expressions are not handled. The
+  `buffer` type is not specifically tested.
 
 **Performance:**
 
 - Interpreted, not compiled. Expect noticeably slower execution than plain Lua.
   Suitable for game scripts and plugins, not hot numeric loops.
+- `--proxify` makes register-heavy code 1.4x to 3.4x slower.
 
 **Scope:**
 
 - Input must be valid Lua 5.1 or Luau source. Compiled `.luac` bytecode is not
   supported.
 - Error messages point at the bundled VM file and line, not at your source.
-- Output size: a small script builds to about 165 KB at the default settings,
-  mostly the VM engine, the decoder, and the stdlib table. Use `--no-minify` to
-  inspect the scaffolding.
+- A small script builds to about 165 KB at the default settings, mostly the VM
+  engine, the decoder, and the stdlib table. Use `--no-minify` to inspect the
+  scaffolding.
 
 ## Files
 
