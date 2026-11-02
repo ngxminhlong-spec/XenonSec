@@ -153,13 +153,16 @@ local function buildStdBlock(tabName, list, names)
   -- Root of the lookups: on Lune and some sandboxes _G is an empty table, but
   -- getfenv(0) still reaches the globals; plain Lua has no getfenv, so _G there.
   lines[#lines + 1] = string.format("local %s, %s = {}, (getfenv and getfenv(0)) or _G", tabName, names.G)
-  -- Bootstrap, found by behaviour rather than by name: the string library is
+  -- Bootstrap, found by behaviour rather than by name. Only string.char and
+  -- string.byte are called here: probing every string function with arbitrary
+  -- arguments at program start is unsafe (it corrupted memory in practice).
+  -- The string library is
   -- reached through the string metatable, and string.char is the function that
   -- gives "AB" for (65, 66); string.byte gives 65, 66 for ("AB", 1, 2).
   lines[#lines + 1] = string.format(
-    'local %s, %s; do local %s, %s = pcall, getmetatable("").__index for _, %s in pairs(%s) do if type(%s) == "function" then local %s, %s = %s(%s, 65, 66) if %s and %s == "AB" then %s = %s end local %s, %s, %s = %s(%s, "AB", 1, 2) if %s and %s == 65 and %s == 66 then %s = %s end end end end',
+    'local %s, %s; do local %s, %s = pcall, getmetatable("").__index for _, %s in pairs({%s.char, %s.byte}) do if type(%s) == "function" then local %s, %s = %s(%s, 65, 66) if %s and %s == "AB" then %s = %s end local %s, %s, %s = %s(%s, "AB", 1, 2) if %s and %s == 65 and %s == 66 then %s = %s end end end end',
     names.byte, names.char,
-    names.pc, names.sm, names.f, names.sm, names.f,
+    names.pc, names.sm, names.f, names.sm, names.sm, names.f,
     names.ok, names.r, names.pc, names.f, names.ok, names.r, names.char, names.f,
     names.ok, names.r, names.j, names.pc, names.f, names.ok, names.r, names.j, names.byte, names.f)
   -- Name decoder: builds the string byte by byte, so it needs no table library.

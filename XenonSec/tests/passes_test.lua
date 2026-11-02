@@ -75,7 +75,7 @@ do
   local src = "local function a() return 1 end local function b(x) return x + 2 end print(a(), b(3))\n"
   local out = Obf.obfuscate(src, "t", { minSize = false })
   local _, blobs = out:gsub('b="', "")
-  local _, nonces = out:gsub(",n=%d+,i=%d+,b=", "")
+  local _, nonces = out:gsub(",n=%d+,i=%d+,r=%d+,bl=%d+,b=", "")
   check("every proto has its own encrypted blob", blobs >= 3 and nonces == blobs,
     ("blobs=%d nonces=%d"):format(blobs, nonces))
   -- A standalone key named c (identifiers can end in c, so anchor the match).

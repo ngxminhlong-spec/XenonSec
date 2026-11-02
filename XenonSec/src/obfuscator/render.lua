@@ -263,12 +263,12 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       -- check index (see the anti-debug block in the header).
       local step = ensureName("adStep")
       local out = {}
-      for _ = 1, 3 do
+      -- Every live check (indexes 1-4) runs in every build, each at its own
+      -- random period and residue. Before, three indexes were drawn at random,
+      -- so a build could skip the check that catches an attached debugger.
+      for index = 1, 4 do
         local period = math.random(257, 1499)
         local residue = math.random(0, period - 1)
-        -- Indexes 1-5 are live checks and the self-test; 11-14 are code hashes.
-        local index = math.random(1, 9)
-        if index > 5 then index = index + 5 end
         out[#out + 1] = string.format("if %s %% %d == %d then %s(%d) end",
           probeExpr(), period, residue, step, index)
       end
