@@ -8,6 +8,8 @@
 --------------------------------------------------------------------
 
 local MASK_MIN = 1000
+local KEYWORDS = {}
+for w in ("and break do else elseif end false for function goto if in local nil not or repeat return then true until while"):gmatch("%a+") do KEYWORDS[w] = true end
 local OPS2 = { [".."] = true, ["=="] = true, ["~="] = true, ["<="] = true, [">="] = true,
   ["//"] = true, ["::"] = true, ["<<"] = true, [">>"] = true }
 
@@ -76,22 +78,64 @@ local function needsSpace(a, b)
   return false
 end
 
+-- Keywords that can end a complete statement or expression.
+local ENDS_EXPR = { ["end"] = true, ["nil"] = true, ["true"] = true, ["false"] = true, ["break"] = true }
+-- Keywords that can start a statement. `do` and `then` are left out on purpose:
+-- they close a loop or if header, and `;` before them would break the header.
+local STARTS_STAT = { ["local"] = true, ["if"] = true, ["for"] = true, ["while"] = true,
+  ["repeat"] = true, ["return"] = true, ["function"] = true, ["break"] = true, ["goto"] = true }
+
+-- True when the token can end a complete statement, so a new one may follow it.
+-- Values, `end` and the closing `)` of a call qualify. Other names are left out:
+-- in Luau a name can end a type (`function f(): number` is followed by its body),
+-- and a `)` that closes a parameter list is followed by the body too.
+local function endsStatement(tk)
+  if tk.t == "num" or tk.t == "str" then return true end
+  if tk.t == "word" then return ENDS_EXPR[tk.v] == true and tk.v:sub(1, 1) ~= "%" end
+  return tk.t == "op" and tk.v == ")" and tk.closesCall == true
+end
+
+-- True when the token can only begin a statement: an identifier, or a keyword
+-- that starts one. Operators, `(` and `do`/`then` never qualify.
+local function startsStatement(tk)
+  if tk.t ~= "word" or tk.v:sub(1, 1) == "%" then return false end
+  if KEYWORDS[tk.v] then return STARTS_STAT[tk.v] == true end
+  return true
+end
+
 local function minify(text, maskKey)
   local toks = tokenize(text)
-  local out, prev = {}, nil
+  local out, prev, prevTok = {}, nil, nil
+  local parens, lastWord, beforeWord = {}, nil, nil
   for _, tk in ipairs(toks) do
     local v = tk.v
+    -- Track what each `(` opens: a parameter list (after `function` or a name
+    -- that follows it) or a call. Only the close of a call may end a statement.
+    if tk.t == "op" and v == "(" then
+      local isParams = (prevTok and prevTok.t == "word" and prevTok.v == "function")
+        or (prevTok and prevTok.t == "word" and beforeWord and beforeWord.t == "word" and beforeWord.v == "function")
+      parens[#parens + 1] = isParams and "params" or "call"
+    elseif tk.t == "op" and v == ")" then
+      local kind = table.remove(parens)
+      tk.closesCall = kind == "call"
+    end
     if tk.t == "num" and v:match("^%d+$") and tonumber(v) >= MASK_MIN and maskKey then
       local k = math.random(1000, 99999)
       v = string.format("((%d+%d)-%d)", tonumber(v), k, k)
     end
     if tk.t == "com" then
       out[#out + 1] = v .. "\n"
-      prev = nil
+      prev, prevTok = nil, nil
     else
-      if prev and needsSpace(prev, v) then out[#out + 1] = " " end
+      if prevTok and endsStatement(prevTok) and startsStatement(tk) then
+        out[#out + 1] = ";"
+        prev = ";"
+      elseif prev and needsSpace(prev, v) then
+        out[#out + 1] = " "
+      end
       out[#out + 1] = v
-      prev = v
+      beforeWord = prevTok
+      prev, prevTok = v, tk
     end
   end
   return table.concat(out)
