@@ -312,6 +312,12 @@ do
   check("minify: long string kept verbatim", m("local t = [[ k -- x ]] x = 2"):find("[[ k -- x ]]", 1, true) ~= nil)
   check("minify: placeholders stay whole", m("local %v% = %w% + 1"):find("%v%", 1, true) ~= nil)
   check("minify: watermark comment kept", m("--[[Protected by XenonSec]]\nlocal q = 3"):sub(1, 13) == "--[[Protected")
+  -- Statements are separated by ';' where the parser finds a boundary.
+  check("minify: statements separated by ';'", m("local x = 7\nprint(x)\n") == "local x=7;print(x)")
+  check("minify: source ';;' collapses to one separator", m("x = 1;;y = 2;") == "x=1;y=2")
+  check("minify: no separator inside a parameter list", m("local function f(a)\n  return a\nend\nprint(f(2))\n") == "local function f(a)return a end;print(f(2))")
+  check("minify: call on the next line stays one statement", m("local a = f\n(g)()\nx = 1\n") == "local a=f(g)();x=1")
+  check("minify: Luau type alias and annotated function", m("type P = { x: number }\nfunction g(a: number): number\n  return a\nend\n") == "type P={x:number};function g(a:number):number return a end")
   check("minify: small literals not masked", m("return 999", true) == "return 999")
   local masked = m("return 5000", true)
   local ok = masked:match("^return%(%(5000%+(%d+)%)%-(%d+)%)$")

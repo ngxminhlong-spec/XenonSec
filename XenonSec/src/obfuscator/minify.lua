@@ -1,17 +1,45 @@
 --------------------------------------------------------------------
 -- XenonSec :: obfuscator/minify.lua
--- Token-aware minifier for the engine templates. Comments are dropped (except
--- the --[[Protected ...]] watermark comment), whitespace is reduced to the
--- spaces Lua needs to keep two tokens apart, and integer literals of 1000 or
--- more are masked as arithmetic (((n+k)-k)) with a per-build key k. %name%
--- placeholders are kept as single tokens so template substitution still works.
+-- Minifier for the engine templates. A tokenizer splits the text, a
+-- recursive-descent parser (Lua 5.1-5.4 and Luau syntax) finds where every
+-- statement starts and ends, and the emitter writes the tokens back with the
+-- spacing Lua needs and a `;` between consecutive statements. Comments are
+-- dropped except the --[[Protected ...]] watermark. Integer literals of 1000
+-- or more are masked as arithmetic ((n+k)-k) with a per-call key.
+--
+-- Placeholders (%name%, __XS_*__) are opaque words. They may expand to nothing
+-- or to whole statements, so no `;` is ever written next to one.
+--
+-- If the parser meets syntax it does not know, the text is emitted with
+-- spacing only (no separators) and M.stats.fallback is counted, so a template
+-- that the parser cannot read is visible in the tests rather than silent.
 --------------------------------------------------------------------
 
 local MASK_MIN = 1000
-local KEYWORDS = {}
-for w in ("and break do else elseif end false for function goto if in local nil not or repeat return then true until while"):gmatch("%a+") do KEYWORDS[w] = true end
 local OPS2 = { [".."] = true, ["=="] = true, ["~="] = true, ["<="] = true, [">="] = true,
   ["//"] = true, ["::"] = true, ["<<"] = true, [">>"] = true }
+local KEYWORDS = {}
+for w in ("and break do else elseif end false for function goto if in local nil not or repeat return then true until while"):gmatch("%a+") do
+  KEYWORDS[w] = true
+end
+local BLOCK_END = { ["end"] = true, ["else"] = true, ["elseif"] = true, ["until"] = true }
+-- Binary operators: { left priority, right priority } (Lua 5.4 table).
+local BIN = {
+  ["or"] = { 1, 1 }, ["and"] = { 2, 2 },
+  ["<"] = { 3, 3 }, [">"] = { 3, 3 }, ["<="] = { 3, 3 }, [">="] = { 3, 3 }, ["~="] = { 3, 3 }, ["=="] = { 3, 3 },
+  ["|"] = { 4, 4 }, ["~"] = { 5, 5 }, ["&"] = { 6, 6 }, ["<<"] = { 7, 7 }, [">>"] = { 7, 7 },
+  [".."] = { 9, 8 }, ["+"] = { 10, 10 }, ["-"] = { 10, 10 },
+  ["*"] = { 11, 11 }, ["/"] = { 11, 11 }, ["//"] = { 11, 11 }, ["%"] = { 11, 11 },
+  ["^"] = { 14, 13 },
+}
+local UNARY_PRI = 12
+
+local stats = { parsed = 0, fallback = 0, lastError = nil }
+
+--------------------------------------------------------------------
+-- Tokenizer. Comments are kept only when they are the watermark; strings and
+-- long strings are single tokens; %name% and __XS_*__ placeholders are words.
+--------------------------------------------------------------------
 
 local function tokenize(s)
   local toks, i, n = {}, 1, #s
@@ -67,6 +95,296 @@ local function tokenize(s)
   return toks
 end
 
+--------------------------------------------------------------------
+-- Parser. Recognises the whole grammar well enough to find statement
+-- boundaries and to reject what it does not understand. It builds no tree:
+-- it returns, for each code token that starts a statement inside a block
+-- (other than the first), a flag saying a separator belongs before it.
+--------------------------------------------------------------------
+
+local function parse(ts)
+  local i, n = 1, #ts
+  local sep, drop = {}, {}
+
+  local function tok(k) return ts[i + (k or 0)] end
+  local function isOp(t, v) return t ~= nil and t.t == "op" and t.v == v end
+  local function isKw(t, v) return t ~= nil and t.t == "word" and t.v == v end
+  local function isName(t) return t ~= nil and t.t == "word" and not KEYWORDS[t.v] end
+  local function fail(msg) error("minify: " .. msg .. " at token " .. i, 0) end
+  local function expectOp(v) if not isOp(tok(), v) then fail("expected '" .. v .. "'") end i = i + 1 end
+  local function expectKw(v) if not isKw(tok(), v) then fail("expected '" .. v .. "'") end i = i + 1 end
+  local function expectName() if not isName(tok()) then fail("expected name") end i = i + 1 end
+
+  -- Skips a balanced group starting at the current token. `>>` closes two
+  -- angle brackets (nested generics), so it is counted as two.
+  local function skipBalanced(open, close)
+    if not isOp(tok(), open) then fail("expected '" .. open .. "'") end
+    local depth = 0
+    repeat
+      local t = tok()
+      if not t then fail("unbalanced '" .. open .. "'") end
+      if t.t == "op" then
+        if t.v == open then depth = depth + 1
+        elseif t.v == close then depth = depth - 1
+        elseif close == ">" and t.v == ">>" then depth = depth - 2 end
+      end
+      i = i + 1
+    until depth <= 0
+  end
+
+  local expr, explist, suffixedexp, tableCons, funcBody, block
+
+  -- Luau type syntax, skipped structurally.
+  local function simpleType()
+    local t = tok()
+    if isOp(t, "{") then skipBalanced("{", "}")
+    elseif isOp(t, "(") then skipBalanced("(", ")")
+    elseif t and (t.t == "str" or t.t == "num") then i = i + 1
+    elseif isKw(t, "typeof") then i = i + 1; skipBalanced("(", ")")
+    elseif isKw(t, "nil") or isKw(t, "true") or isKw(t, "false") then i = i + 1
+    elseif isName(t) then
+      i = i + 1
+      while isOp(tok(), ".") do i = i + 1; expectName() end
+      if isOp(tok(), "<") then skipBalanced("<", ">") end
+    else
+      fail("expected type")
+    end
+  end
+  local function typ()
+    simpleType()
+    while true do
+      local t = tok()
+      if isOp(t, "|") or isOp(t, "&") then i = i + 1; simpleType()
+      elseif isOp(t, "?") then i = i + 1
+      elseif isOp(t, "-") and isOp(ts[i + 1], ">") then i = i + 2; typ()
+      else break end
+    end
+  end
+
+  -- Parameter list up to (not including) `)`. Placeholders may sit next to
+  -- names (annotations expand into them), so any word is accepted here.
+  local function params()
+    while true do
+      local t = tok()
+      if not t then fail("unterminated parameter list") end
+      if isOp(t, ")") then return end
+      if isOp(t, ",") then i = i + 1
+      elseif isOp(t, ":") then i = i + 1; typ()
+      elseif t.t == "word" or isOp(t, "...") then i = i + 1
+      else fail("bad parameter") end
+    end
+  end
+
+  funcBody = function()
+    if isOp(tok(), "<") then skipBalanced("<", ">") end
+    expectOp("(")
+    params()
+    expectOp(")")
+    if isOp(tok(), ":") then i = i + 1; typ() end
+    block()
+    expectKw("end")
+  end
+
+  tableCons = function()
+    expectOp("{")
+    while not isOp(tok(), "}") do
+      local t = tok()
+      if not t then fail("unterminated table") end
+      if isOp(t, "[") then
+        i = i + 1; expr(0); expectOp("]"); expectOp("="); expr(0)
+      elseif isName(t) and isOp(ts[i + 1], "=") then
+        i = i + 2; expr(0)
+      else
+        expr(0)
+      end
+      local s = tok()
+      if isOp(s, ",") or isOp(s, ";") then i = i + 1
+      elseif not isOp(s, "}") then fail("bad table field") end
+    end
+    i = i + 1
+  end
+
+  local function args()
+    local t = tok()
+    if t and t.t == "str" then i = i + 1
+    elseif isOp(t, "{") then tableCons()
+    else
+      expectOp("(")
+      if not isOp(tok(), ")") then explist() end
+      expectOp(")")
+    end
+  end
+
+  local function primary()
+    local t = tok()
+    if isName(t) then i = i + 1
+    elseif isOp(t, "(") then i = i + 1; expr(0); expectOp(")")
+    else fail("expected expression") end
+  end
+
+  suffixedexp = function()
+    primary()
+    while true do
+      local t = tok()
+      if isOp(t, ".") then i = i + 1; expectName()
+      elseif isOp(t, "[") then i = i + 1; expr(0); expectOp("]")
+      elseif isOp(t, ":") then i = i + 1; expectName(); args()
+      elseif isOp(t, "(") or isOp(t, "{") or (t and t.t == "str") then args()
+      else break end
+    end
+  end
+
+  local function simpleExpr()
+    local t = tok()
+    if not t then fail("expected expression") end
+    if t.t == "num" or t.t == "str" then i = i + 1
+    elseif isKw(t, "nil") or isKw(t, "true") or isKw(t, "false") then i = i + 1
+    elseif isOp(t, "...") then i = i + 1
+    elseif isKw(t, "function") then i = i + 1; funcBody()
+    elseif isKw(t, "if") then
+      -- Luau if-expression
+      i = i + 1; expr(0); expectKw("then"); expr(0)
+      while isKw(tok(), "elseif") do i = i + 1; expr(0); expectKw("then"); expr(0) end
+      expectKw("else"); expr(0)
+    elseif isOp(t, "{") then tableCons()
+    else suffixedexp() end
+  end
+
+  expr = function(limit)
+    local t = tok()
+    if isKw(t, "not") or isOp(t, "-") or isOp(t, "#") or isOp(t, "~") then
+      i = i + 1; expr(UNARY_PRI)
+    else
+      simpleExpr()
+    end
+    while true do
+      local b = tok()
+      local pr
+      if b and (b.t == "op" or (b.t == "word" and (b.v == "and" or b.v == "or"))) then pr = BIN[b.v] end
+      if not pr or pr[1] <= limit then break end
+      i = i + 1
+      expr(pr[2])
+    end
+  end
+
+  explist = function()
+    expr(0)
+    while isOp(tok(), ",") do i = i + 1; expr(0) end
+  end
+
+  local function localNames()
+    while true do
+      expectName()
+      if isOp(tok(), "<") then skipBalanced("<", ">") end
+      if isOp(tok(), ":") then i = i + 1; typ() end
+      if isOp(tok(), ",") then i = i + 1 else break end
+    end
+  end
+
+  local function exprStat()
+    suffixedexp()
+    if isOp(tok(), "=") or isOp(tok(), ",") then
+      while isOp(tok(), ",") do i = i + 1; suffixedexp() end
+      expectOp("=")
+      explist()
+    end
+  end
+
+  local statement
+  statement = function()
+    local t = tok()
+    if isOp(t, "::") then
+      i = i + 1; expectName(); expectOp("::")
+    elseif not t or t.t ~= "word" then
+      exprStat()
+    elseif t.v == "local" then
+      i = i + 1
+      if isKw(tok(), "function") then
+        i = i + 1; expectName(); funcBody()
+      else
+        localNames()
+        if isOp(tok(), "=") then i = i + 1; explist() end
+      end
+    elseif t.v == "function" then
+      i = i + 1; expectName()
+      while isOp(tok(), ".") do i = i + 1; expectName() end
+      if isOp(tok(), ":") then i = i + 1; expectName() end
+      funcBody()
+    elseif t.v == "if" then
+      i = i + 1; expr(0); expectKw("then"); block()
+      while isKw(tok(), "elseif") do i = i + 1; expr(0); expectKw("then"); block() end
+      if isKw(tok(), "else") then i = i + 1; block() end
+      expectKw("end")
+    elseif t.v == "while" then
+      i = i + 1; expr(0); expectKw("do"); block(); expectKw("end")
+    elseif t.v == "do" then
+      i = i + 1; block(); expectKw("end")
+    elseif t.v == "for" then
+      i = i + 1; expectName()
+      if isOp(tok(), ":") then i = i + 1; typ() end
+      if isOp(tok(), "=") then
+        i = i + 1; expr(0); expectOp(","); expr(0)
+        if isOp(tok(), ",") then i = i + 1; expr(0) end
+      else
+        while isOp(tok(), ",") do
+          i = i + 1; expectName()
+          if isOp(tok(), ":") then i = i + 1; typ() end
+        end
+        expectKw("in"); explist()
+      end
+      expectKw("do"); block(); expectKw("end")
+    elseif t.v == "repeat" then
+      i = i + 1; block(); expectKw("until"); expr(0)
+    elseif t.v == "return" then
+      i = i + 1
+      local nt = tok()
+      if not (nt == nil or isOp(nt, ";") or (nt.t == "word" and BLOCK_END[nt.v])) then explist() end
+      if isOp(tok(), ";") then drop[i] = true; i = i + 1 end
+      return true
+    elseif t.v == "break" then
+      i = i + 1
+    elseif t.v == "goto" then
+      i = i + 1; expectName()
+    elseif t.v == "type" and isName(ts[i + 1]) and (isOp(ts[i + 2], "=") or isOp(ts[i + 2], "<")) then
+      i = i + 1; expectName()
+      if isOp(tok(), "<") then skipBalanced("<", ">") end
+      expectOp("="); typ()
+    elseif t.v == "export" and isKw(ts[i + 1], "type") then
+      i = i + 1
+      return statement()
+    else
+      exprStat()
+    end
+    return false
+  end
+
+  block = function()
+    local first, returned = true, false
+    while true do
+      local t = tok()
+      if t == nil or (t.t == "word" and BLOCK_END[t.v]) then return end
+      if isOp(t, ";") then
+        drop[i] = true
+        i = i + 1
+      else
+        if returned then fail("statement after return") end
+        -- Every statement after the first in its block is preceded by a separator.
+        if not first then sep[i] = true end
+        first = false
+        returned = statement()
+      end
+    end
+  end
+
+  block()
+  if i <= n then fail("unexpected token") end
+  return sep, drop
+end
+
+--------------------------------------------------------------------
+-- Emitter
+--------------------------------------------------------------------
+
 -- True when two adjacent token texts would otherwise merge or change meaning.
 local function needsSpace(a, b)
   local x, y = a:sub(-1), b:sub(1, 1)
@@ -78,67 +396,73 @@ local function needsSpace(a, b)
   return false
 end
 
--- Keywords that can end a complete statement or expression.
-local ENDS_EXPR = { ["end"] = true, ["nil"] = true, ["true"] = true, ["false"] = true, ["break"] = true }
--- Keywords that can start a statement. `do` and `then` are left out on purpose:
--- they close a loop or if header, and `;` before them would break the header.
-local STARTS_STAT = { ["local"] = true, ["if"] = true, ["for"] = true, ["while"] = true,
-  ["repeat"] = true, ["return"] = true, ["function"] = true, ["break"] = true, ["goto"] = true }
-
--- True when the token can end a complete statement, so a new one may follow it.
--- Values, `end` and the closing `)` of a call qualify. Other names are left out:
--- in Luau a name can end a type (`function f(): number` is followed by its body),
--- and a `)` that closes a parameter list is followed by the body too.
-local function endsStatement(tk)
-  if tk.t == "num" or tk.t == "str" then return true end
-  if tk.t == "word" then return ENDS_EXPR[tk.v] == true and tk.v:sub(1, 1) ~= "%" end
-  return tk.t == "op" and tk.v == ")" and tk.closesCall == true
+local function isPlaceholder(v)
+  return v:sub(1, 1) == "%" or v:match("^__XS_.*__$") ~= nil
 end
 
--- True when the token can only begin a statement: an identifier, or a keyword
--- that starts one. Operators, `(` and `do`/`then` never qualify.
-local function startsStatement(tk)
-  if tk.t ~= "word" or tk.v:sub(1, 1) == "%" then return false end
-  if KEYWORDS[tk.v] then return STARTS_STAT[tk.v] == true end
-  return true
-end
-
-local function minify(text, maskKey)
-  local toks = tokenize(text)
+local function emit(code, tail, sep, drop, maskKey)
   local out, prev, prevTok = {}, nil, nil
-  local parens, lastWord, beforeWord = {}, nil, nil
-  for _, tk in ipairs(toks) do
-    local v = tk.v
-    -- Track what each `(` opens: a parameter list (after `function` or a name
-    -- that follows it) or a call. Only the close of a call may end a statement.
-    if tk.t == "op" and v == "(" then
-      local isParams = (prevTok and prevTok.t == "word" and prevTok.v == "function")
-        or (prevTok and prevTok.t == "word" and beforeWord and beforeWord.t == "word" and beforeWord.v == "function")
-      parens[#parens + 1] = isParams and "params" or "call"
-    elseif tk.t == "op" and v == ")" then
-      local kind = table.remove(parens)
-      tk.closesCall = kind == "call"
-    end
-    if tk.t == "num" and v:match("^%d+$") and tonumber(v) >= MASK_MIN and maskKey then
-      local k = math.random(1000, 99999)
-      v = string.format("((%d+%d)-%d)", tonumber(v), k, k)
-    end
-    if tk.t == "com" then
-      out[#out + 1] = v .. "\n"
-      prev, prevTok = nil, nil
+  local carry = {}   -- comments that belonged to a dropped `;`
+  for idx, tk in ipairs(code) do
+    if drop and drop[idx] then
+      for _, c in ipairs(tk.pre or {}) do carry[#carry + 1] = c end
     else
-      if prevTok and endsStatement(prevTok) and startsStatement(tk) then
+      local v = tk.v
+      if tk.t == "num" and maskKey and v:match("^%d+$") and tonumber(v) >= MASK_MIN then
+        local k = math.random(1000, 99999)
+        v = string.format("((%d+%d)-%d)", tonumber(v), k, k)
+      end
+      -- The separator goes before the comments, so a comment never sits between
+      -- a statement and the `;` that ends it.
+      local needSep = sep and sep[idx] and prevTok and not isPlaceholder(prevTok.v) and not isPlaceholder(tk.v)
+      if needSep then
         out[#out + 1] = ";"
         prev = ";"
-      elseif prev and needsSpace(prev, v) then
-        out[#out + 1] = " "
       end
+      local comments = {}
+      for _, c in ipairs(carry) do comments[#comments + 1] = c end
+      for _, c in ipairs(tk.pre or {}) do comments[#comments + 1] = c end
+      carry = {}
+      for _, c in ipairs(comments) do
+        out[#out + 1] = c.v .. "\n"
+        prev = nil
+      end
+      if not needSep and prev and needsSpace(prev, v) then out[#out + 1] = " " end
       out[#out + 1] = v
-      beforeWord = prevTok
       prev, prevTok = v, tk
     end
   end
+  for _, c in ipairs(carry) do out[#out + 1] = c.v .. "\n" end
+  for _, c in ipairs(tail) do out[#out + 1] = c.v .. "\n" end
   return table.concat(out)
 end
 
-return { minify = minify, tokenize = tokenize }
+-- Splits the tokens into code and comments: a watermark comment is attached to
+-- the code token after it; any trailing comment is returned separately.
+local function splitTokens(text)
+  local code, pending = {}, {}
+  for _, tk in ipairs(tokenize(text)) do
+    if tk.t == "com" then
+      pending[#pending + 1] = tk
+    else
+      if #pending > 0 then tk.pre = pending; pending = {} end
+      code[#code + 1] = tk
+    end
+  end
+  return code, pending
+end
+
+local function minify(text, maskKey)
+  local code, tail = splitTokens(text)
+  local ok, sep, drop = pcall(parse, code)
+  if ok then
+    stats.parsed = stats.parsed + 1
+  else
+    stats.fallback = stats.fallback + 1
+    stats.lastError = sep
+    sep, drop = nil, nil
+  end
+  return emit(code, tail, sep, drop, maskKey)
+end
+
+return { minify = minify, tokenize = tokenize, stats = stats }
