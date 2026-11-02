@@ -16,6 +16,9 @@
 --------------------------------------------------------------------
 
 local MASK_MIN = 1000
+-- Luau compound assignment operators (two and three characters).
+local COMPOUND = { ["+="] = true, ["-="] = true, ["*="] = true, ["/="] = true, ["%="] = true,
+  ["^="] = true, ["//="] = true, ["..="] = true }
 local OPS2 = { [".."] = true, ["=="] = true, ["~="] = true, ["<="] = true, [">="] = true,
   ["//"] = true, ["::"] = true, ["<<"] = true, [">>"] = true }
 local KEYWORDS = {}
@@ -64,6 +67,20 @@ local function tokenize(s)
       e = e or n
       toks[#toks + 1] = { t = "str", v = s:sub(i, e) }
       i = e + 1
+    elseif c == "`" then
+      -- Luau interpolated string: `text {expr} text`. Braces are counted so a
+      -- closing backtick inside an interpolation does not end the string.
+      local j, depth = i + 1, 0
+      while j <= n do
+        local d = s:sub(j, j)
+        if d == "\\" then j = j + 2
+        elseif d == "{" then depth = depth + 1; j = j + 1
+        elseif d == "}" then depth = depth - 1; j = j + 1
+        elseif d == "`" and depth == 0 then break
+        else j = j + 1 end
+      end
+      toks[#toks + 1] = { t = "str", v = s:sub(i, j) }
+      i = j + 1
     elseif c == '"' or c == "'" then
       local j = i + 1
       while j <= n do
@@ -88,6 +105,9 @@ local function tokenize(s)
         toks[#toks + 1] = { t = "num", v = num }; i = i + #num
       else
         local op = s:sub(i, i + 2) == "..." and "..." or (OPS2[s:sub(i, i + 1)] and s:sub(i, i + 1)) or c
+        if COMPOUND[s:sub(i, i + 3)] then op = s:sub(i, i + 3)
+        elseif COMPOUND[s:sub(i, i + 2)] then op = s:sub(i, i + 2)
+        elseif COMPOUND[s:sub(i, i + 1)] then op = s:sub(i, i + 1) end
         toks[#toks + 1] = { t = "op", v = op }; i = i + #op
       end
     end
@@ -137,6 +157,11 @@ local function parse(ts)
   -- Luau type syntax, skipped structurally.
   local function simpleType()
     local t = tok()
+    if isOp(t, "<") then
+      -- generic function type: <T>(T) -> T
+      skipBalanced("<", ">")
+      return simpleType()
+    end
     if isOp(t, "{") then skipBalanced("{", "}")
     elseif isOp(t, "(") then skipBalanced("(", ")")
     elseif t and (t.t == "str" or t.t == "num") then i = i + 1
@@ -257,6 +282,7 @@ local function parse(ts)
     else
       simpleExpr()
     end
+    if isOp(tok(), "::") then i = i + 1; typ() end
     while true do
       local b = tok()
       local pr
@@ -283,7 +309,11 @@ local function parse(ts)
 
   local function exprStat()
     suffixedexp()
-    if isOp(tok(), "=") or isOp(tok(), ",") then
+    local t = tok()
+    if t and t.t == "op" and COMPOUND[t.v] then
+      i = i + 1
+      explist()
+    elseif isOp(t, "=") or isOp(t, ",") then
       while isOp(tok(), ",") do i = i + 1; suffixedexp() end
       expectOp("=")
       explist()
