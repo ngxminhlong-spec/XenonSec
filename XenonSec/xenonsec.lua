@@ -6,6 +6,9 @@
 
 local scriptDir = (debug.getinfo(1, "S").source:match("@?(.*/)") or "./")
 local Obf = dofile(scriptDir .. "obfuscate.lua")
+if Obf.weakSeed then
+  io.stderr:write("XenonSec: warning: /dev/urandom not available; build seed is weak (timestamp + address)\n")
+end
 
 local function usage()
   io.stderr:write([[

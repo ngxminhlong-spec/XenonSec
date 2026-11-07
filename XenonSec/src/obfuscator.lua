@@ -44,9 +44,26 @@ local LZDEC_TEMPLATE = load("templates/lzdec")
 local _tm = load("typemangler")
 local buildTypeMangler, scatterType = _tm.buildTypeMangler, _tm.scatterType
 
-math.randomseed(os.time() + (tonumber(tostring({}):match("0x(%x+)"), 16) or 0))
--- burn a few values; Lua's stock PRNG is weak but this is for build-time
--- diversification (opcode shuffles / keys), not cryptographic security.
+-- Seed from the OS entropy pool: six bytes of /dev/urandom (48 bits, the most a
+-- Lua double holds exactly). The old seed, os.time() plus a table address, had
+-- about 30 bits per second and could be reproduced from a timestamp guess.
+-- Without /dev/urandom we fall back to that seed and say so (weakSeed).
+local function entropySeed()
+  local f = io.open("/dev/urandom", "rb")
+  if f then
+    local bytes = f:read(6)
+    f:close()
+    if bytes and #bytes == 6 then
+      local v = 0
+      for i = 1, 6 do v = v * 256 + bytes:byte(i) end
+      return v, false
+    end
+  end
+  return os.time() + (tonumber(tostring({}):match("0x(%x+)"), 16) or 0), true
+end
+local seedValue, weakSeed = entropySeed()
+math.randomseed(seedValue)
+-- burn a few values; the build's layout and keys are drawn from this stream.
 for _ = 1, 8 do math.random() end
 
 --------------------------------------------------------------------
@@ -381,4 +398,4 @@ local function obfuscate(source, chunkname, opts)
   return out
 end
 
-return { obfuscate = obfuscate }
+return { obfuscate = obfuscate, weakSeed = weakSeed }

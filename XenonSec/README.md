@@ -12,7 +12,9 @@ identifiers from your source, no plaintext strings, no fixed opcode numbers,
 and nothing at the top level except one expression.
 
 > **Status.** Obfuscation raises the cost of reading and copying a script. It
-> is not secrecy and not a security boundary. See [Limitations](#limitations).
+> is not secrecy and not a security boundary. Every key the program needs is
+> stored in the output file, so anyone who has that file can recover the code.
+> See [Limitations](#limitations).
 
 ## Quick start
 
@@ -69,7 +71,7 @@ lune run game.xenon.luau        # or: lute run game.xenon.luau
 
 Runtime notes:
 
-- Global names are encrypted constants in the output. Global reads and writes
+- Global names are constants in the output, encrypted with a key that also ships in the output. Global reads and writes
   go through an accessor chosen at startup:
   - If the real global environment is writable (Lua 5.1 via `getfenv(0)`, Lua
     5.3+ via `_G`, Lune), globals go straight to it. Semantics match the raw
@@ -88,16 +90,16 @@ Runtime notes:
 
 | Layer | What happens |
 |---|---|
-| **Identifiers** | A scope resolver renames every local, parameter, and loop variable to an opaque token. Genuine globals keep their names internally and are encrypted at rest like every other string. |
+| **Identifiers** | A scope resolver renames every local, parameter, and loop variable to an opaque token. Genuine globals keep their names internally and are encrypted with a key that also ships in the output, like every other string. |
 | **Control flow** | Compiled to register bytecode and run by a handler-table state machine. Control-flow flattening shuffles basic blocks and adds dead decoy blocks. No `if`/`while` or linear dispatch chain is left to read. |
 | **Opcodes and operands** | Each instruction carries its own random seed. Its opcode and operands are stored masked with a value derived from that seed and the field's slot. The VM decodes each instruction just before running it and never holds a decoded program. |
 | **Numeric keys and indexes** | Table keys and indexes in the generated code (handler tables, opcode alias tables, stdlib slots, escaped-constant entries) are written as `((n+k)-k)` with a fresh key per literal, so the numbers do not appear directly. |
 | **Operators** | Binary and unary operators dispatch through per-build randomized integers. No operator symbol appears in the output, not even as a table key. |
-| **Bytecode per proto** | Each function's instructions are packed and encrypted with its own key, derived from the build key and a per-proto nonce. A proto is decrypted the first time it is called. Protos that never run stay encrypted. |
-| **Runtime decoder** | The LZMA-style decoder that unpacks the proto records is itself compiled by this VM, so it ships as encrypted bytecode, not readable Lua. Its own protos are stored uncompressed, because they are what decompresses the rest. The range-coder adaptation rate (16 or 32) is chosen per build, and the compressor uses the same value. This costs about 40 KB per output. |
+| **Bytecode per proto** | Each function's instructions are packed and encrypted with its own key, derived from the build key and a per-proto nonce. The build key ships in the output, so this hides code from casual reading, not from a determined reverser. A proto is decrypted the first time it is called. Protos that never run stay encrypted. |
+| **Runtime decoder** | The LZMA-style decoder that unpacks the proto records is itself compiled by this VM, so it ships as encrypted bytecode, not readable Lua. Its key still ships in the output. Its own protos are stored uncompressed, because they are what decompresses the rest. The range-coder adaptation rate (16 or 32) is chosen per build, and the compressor uses the same value. This costs about 40 KB per output. |
 | **State-dependent decoding** | Each instruction's decode masks depend on a running state that advances with every executed opcode and resets at jumps and returns. The stored tuples can only be decoded by replaying the program's control flow. |
 | **MBA arithmetic** | `+` and `-` on non-negative integers below 2^52 (default) use bitwise identities (`a+b = (a^b) + 2(a&b)`), so the dispatcher has no plain integer `+` or `-` in that range. Other operands use the real operator. Options: `mba = false` disables it; `mbaLimit = 67108864` (2^26) trades coverage for speed (about 2x on large-operand arithmetic). |
-| **Strings and constants** | One shared constant pool, shuffled and encrypted with a per-build cipher and key. Constants are decrypted lazily on first use and cached. Constants the program never reaches are never decrypted. |
+| **Strings and constants** | One shared constant pool, shuffled and encrypted with a per-build cipher. Its key ships in the output. Constants are decrypted lazily on first use and cached. Constants the program never reaches are never decrypted. |
 | **Standard-library names** | Functions such as `string.format`, `pcall`, and `table.concat` are looked up through one table filled at startup, not named in the code. Each name is stored under its own keystream (a per-name seed run through a multiplicative generator), so the encoded bytes differ for every build. The bootstrap finds `string.char` and `string.byte` by behavior, not by name. |
 | **Decoys** | Unreferenced decoy constants, decoy opcode handlers, decoy dispatch branches, and dead blocks, all in the same format as real code. |
 | **Junk instructions** | `JUNK` writes into a scratch register no real instruction uses. Junk never lands inside a variable-length result window, and jump targets are remapped exactly. |
@@ -280,13 +282,13 @@ XenonSec/
 | Pass-level, including minifier and literal masking | `lua tests/passes_test.lua` | 39 / 39 |
 | Metamorphic builds, standard-library lookups, key masking | `lua tests/mutate_test.lua` | 21 / 21 |
 | ProxifyLocal, with and without other options | `lua tests/proxify_test.lua` | 31 / 31 |
-| Anti-tamper and anti-debug | `lua tests/protection_test.lua` | 31 / 33 |
-| Lune differential suite (10 programs x option sets, plus an env-logger check) | `sh tests/run_runtime.sh <runtime> lua` | 86 / 86 on Lune |
+| Anti-tamper and anti-debug | `lua tests/protection_test.lua` | 36 / 36 |
+| Lune differential suite (10 programs x option sets, plus an env-logger check) | `sh tests/run_runtime.sh <runtime> lua` | 86 / 86 on Lune (last recorded; not re-run in this pass) |
 
-`protection_test.lua` has two known failing checks, "bytecode-check prefix found
-in the output" and "anti-debug build has the bytecode-hash prefix". They are
-open issues, not regressions in the current build. The mid-run debugger-attach
-check is timing-sensitive and can fail intermittently.
+`protection_test.lua` passes every check. The mid-run debugger-attach check used
+to depend on the build's random draw of anti-debug checks; every live check now runs in
+every build, so it is no longer timing-dependent by design (it still runs at random
+periods, so the timing of a detection varies).
 
 `difftest.lua` is a helper module loaded by `run_tests.lua`, not a standalone
 suite.
