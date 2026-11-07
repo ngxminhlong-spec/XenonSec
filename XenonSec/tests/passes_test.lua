@@ -331,7 +331,6 @@ do
 end
 
 print()
-print(pass .. " / " .. total .. " pass-level tests passed")
 
 do
   -- LZMA codec round trip: empty, tiny, runs, random bytes, record-like data.
@@ -368,3 +367,4 @@ do
   check("each proto has its own odd register multiplier", #ras >= 3 and allOdd and count == #ras,
     ("protos=%d distinct=%d"):format(#ras, count))
 end
+print(pass .. " / " .. total .. " pass-level tests passed")
