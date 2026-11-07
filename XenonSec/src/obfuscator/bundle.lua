@@ -475,6 +475,10 @@ local function buildBundle(mod, opts)
   local protoLits = {}
   for pi, proto in ipairs(mod.protos) do
     local nonce = math.random(1, MOD - 1)
+    -- Register map for this proto (ProxifyLocal): (i * ra + rb) mod 2^20, ra odd.
+    -- Only used when proxify is on; otherwise the identity-like map (1, 0) is stored.
+    local ra, rb = 1, 0
+    if opts.proxify then ra = 2 * math.random(0, 524287) + 1; rb = math.random(0, 1048575) end
     local hasV = proto.hasVararg and 1 or 0
     -- Runtime-decoder protos are stored without LZMA (they are what decodes
     -- LZMA), so the runtime must know which ones to skip; the flag is covered
@@ -544,11 +548,11 @@ local function buildBundle(mod, opts)
     end
     checksum = mixChecksum(checksum, psum)
     protoLits[#protoLits + 1] = string.format(
-      "{p={%s},v=%s,w=%s,k=%d,n=%d,i=%d,r=%d,bl=%d,b=%s}",
+      "{p={%s},v=%s,w=%s,k=%d,ra=%d,rb=%d,n=%d,i=%d,r=%d,bl=%d,b=%s}",
       table.concat(paramParts, ","),
       proto.hasVararg and "true" or "false",
       rawF == 1 and "true" or "false",
-      psum, nonce, ih, bucketLen(#table.concat(raw)), #blob, luaBytes(stored)
+      psum, ra, rb, nonce, ih, bucketLen(#table.concat(raw)), #blob, luaBytes(stored)
     )
   end
   checksum = keyedFinal(checksum, key)

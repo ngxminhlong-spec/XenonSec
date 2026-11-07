@@ -313,7 +313,12 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       return tostring(KV[tok:sub(3)])
     end
     if tok == "NEWREGS" then
-      if KV and KV.proxify then return "setmetatable({[0] = {}}, " .. ensureName("RMETA") .. ")" end
+      if KV and KV.proxify then
+        -- Per-function register map: the proto's own (ra, rb) ride in the frame at
+        -- raw keys -1 and -2, which register numbers (>= 0) never use.
+        local p = ensureName("proto")
+        return "setmetatable({[0] = {}, [-1] = " .. p .. ".ra, [-2] = " .. p .. ".rb}, " .. ensureName("RMETA") .. ")"
+      end
       return "{}"
     end
     if tok == "NEWVARS" then
@@ -333,8 +338,8 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       local A, B, M = tostring(KV.PA), tostring(KV.PB), tostring(KV.PM)
       return table.concat({
         "local " .. RM .. " = {}",
-        RM .. ".__index = function(" .. pt .. ", " .. pk .. ") local " .. pb .. " = " .. pt .. "[0][(" .. pk .. " * " .. A .. " + " .. B .. ") % " .. M .. "]; if " .. pb .. " then return " .. pb .. "[1] end return nil end",
-        RM .. ".__newindex = function(" .. pt .. ", " .. pk .. ", " .. pv .. ") " .. pt .. "[0][(" .. pk .. " * " .. A .. " + " .. B .. ") % " .. M .. "] = { " .. pv .. " } end",
+        RM .. ".__index = function(" .. pt .. ", " .. pk .. ") local " .. pb .. " = " .. pt .. "[0][(" .. pk .. " * " .. pt .. "[-1] + " .. pt .. "[-2]) % " .. M .. "]; if " .. pb .. " then return " .. pb .. "[1] end return nil end",
+        RM .. ".__newindex = function(" .. pt .. ", " .. pk .. ", " .. pv .. ") " .. pt .. "[0][(" .. pk .. " * " .. pt .. "[-1] + " .. pt .. "[-2]) % " .. M .. "] = { " .. pv .. " } end",
         "local " .. VM .. " = {}",
         VM .. ".__index = function(" .. pt .. ", " .. pk .. ") local " .. pb .. " = " .. pt .. "[0][" .. pk .. "]; if " .. pb .. " then return " .. pb .. "[1] end return nil end",
         VM .. ".__newindex = function(" .. pt .. ", " .. pk .. ", " .. pv .. ") " .. pt .. "[0][" .. pk .. "] = { " .. pv .. " } end",

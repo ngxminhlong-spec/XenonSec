@@ -106,8 +106,8 @@ do
   local src = "local function f(n) local s = 0 for i = 1, n do s = s + i end return s end\n" ..
               "local t = 0 for i = 1, 30000 do t = t + f(3) end print('done', t)\n"
   local out = Obf.obfuscate(src, "p", { minSize = false })
-  local tampered, n = out:gsub("k=(%d+),n=", function(k)
-    return "k=" .. tostring((tonumber(k) + 1) % 2147483647) .. ",n="
+  local tampered, n = out:gsub("k=(%d+),ra=", function(k)
+    return "k=" .. tostring((tonumber(k) + 1) % 2147483647) .. ",ra="
   end)
   check("periodic verifier sees the patched checksums", n >= 1, "patched=" .. n)
   local chunk = load(tampered, "p2", "t")
@@ -349,4 +349,22 @@ do
     if Lzma.decompress(Lzma.compress(s)) ~= s then allOk = false end
   end
   check("LZMA codec round-trips every case", allOk)
+end
+
+do
+  -- Per-function register map (ProxifyLocal): every proto gets its own (ra, rb),
+  -- with ra odd so the map is a bijection on [0, 2^20).
+  local src = "local function a(x) local y = x + 1 return y end local function b(x) local y = x * 2 return y end print(a(1), b(2))\n"
+  local out = Obf.obfuscate(src, "rm", { proxify = true, minSize = false })
+  local ras, allOdd = {}, true
+  for ra in out:gmatch("ra=(%d+),rb=") do
+    ras[#ras + 1] = tonumber(ra)
+    if tonumber(ra) % 2 ~= 1 then allOdd = false end
+  end
+  local distinct = {}
+  for _, v in ipairs(ras) do distinct[v] = true end
+  local count = 0
+  for _ in pairs(distinct) do count = count + 1 end
+  check("each proto has its own odd register multiplier", #ras >= 3 and allOdd and count == #ras,
+    ("protos=%d distinct=%d"):format(#ras, count))
 end
