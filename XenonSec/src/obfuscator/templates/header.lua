@@ -24,6 +24,7 @@ local %tagS% = __XS_TAGS__
 local %tagF% = __XS_TAGF__
 local %tagZ% = __XS_TAGZ__
 local %tagNaN% = __XS_TAGNAN__
+local %tagI% = __XS_TAGI__
 
 -- Key vault. The key is never stored as a list. Each key byte is split into
 -- three XOR shares; every share sits at a shuffled position in one masked
@@ -410,6 +411,7 @@ local function %constval%(%dv%)
   elseif %tg% == %tagF% then %val% = tonumber(%dv%:sub(2))
   elseif %tg% == %tagZ% then %val% = -1.0 * 0.0
   elseif %tg% == %tagNaN% then %val% = 0.0 / 0.0
+  elseif %tg% == %tagI% then %val% = tonumber(%dv%:sub(2))
   else %val% = %dv%:sub(2) end
   return %val%
 end

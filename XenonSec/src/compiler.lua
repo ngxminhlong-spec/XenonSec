@@ -40,7 +40,9 @@ local function newModule()
 end
 
 local function addConst(mod, value)
-	local key = type(value) .. ":" .. tostring(value)
+	-- Keys must tell apart every distinct number: tostring keeps 14 digits, so
+	-- 4503599627370495.0 and 4503599627370496.0 would share a constant.
+	local key = type(value) .. ":" .. (type(value) == "number" and (((math.type and math.type(value) == "integer") and string.format("%d", value)) or string.format("%.17g", value)) .. (math.type and math.type(value) or "") or tostring(value))
 	local existing = mod.constIndex[key]
 	if existing then return existing end
 	mod.consts[#mod.consts + 1] = value

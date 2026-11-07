@@ -74,8 +74,8 @@ do
   -- every proto carries its own nonce and ciphertext blob.
   local src = "local function a() return 1 end local function b(x) return x + 2 end print(a(), b(3))\n"
   local out = Obf.obfuscate(src, "t", { minSize = false })
-  local _, blobs = out:gsub('b="', "")
-  local _, nonces = out:gsub(",n=%d+,i=%d+,r=%d+,bl=%d+,b=", "")
+  local _, blobs = out:gsub(",bl=%d+,b=", "")
+  local _, nonces = out:gsub(",n=%d+,", "")
   check("every proto has its own encrypted blob", blobs >= 3 and nonces == blobs,
     ("blobs=%d nonces=%d"):format(blobs, nonces))
   -- A standalone key named c (identifiers can end in c, so anchor the match).
@@ -174,7 +174,7 @@ do
   -- for integers (both sides of the 2^26 limit), negatives, floats (including
   -- integral floats, whose type must survive), and metamethod operands.
   local src = [[
-local vals = { 0, 1, 2, 3, 7, 1000, 67108863, 67108864, 2^30, -5, 2.5, 1.0, 3.0, 0.5, 0.0, -0.0 }
+local vals = { 0, 1, 2, 3, 7, 1000, 67108863, 67108864, 2^30, 2^52 - 1, 2^52, 4503599627370495, -5, 2.5, 1.0, 3.0, 0.5, 0.0, -0.0 }
 local out = {}
 for i = 1, #vals do for j = 1, #vals do
   local a, b = vals[i], vals[j]
@@ -204,7 +204,8 @@ do
   -- Number constants round-trip exactly: full float precision, integers past
   -- 14 digits, -0.0, inf, nan, and integral floats keep their float type.
   local src = "print(1/3, 0.1 + 0.2, 123456789012345, 2^53 + 2, -0.0, 1/(-0.0), 1/0, 3.0, 2^60, 0/0 ~= 0/0)\n" ..
-              "print(9007199254740991, -9007199254740991, 4611686018427387903, math.type and math.type(9007199254740991))\n"
+              "print(9007199254740991, -9007199254740991, 4611686018427387903, math.type and math.type(9007199254740991))\n" ..
+              "print(9223372036854775807, 4611686018427387905, -4611686018427387905)\n"
   local function run(chunk)
     local got, realPrint = {}, print
     print = function(...)

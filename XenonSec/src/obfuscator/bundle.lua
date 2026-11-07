@@ -9,6 +9,13 @@ local _crypto = load("crypto")
 local cipherEncrypt = _crypto.cipherEncrypt
 local CIPHER = _crypto.CIPHER
 local lzmaCompress = load("lzma").compress
+-- Stored raw length is rounded up to a power of two: the runtime only needs an
+-- upper bound (it stops decoding past it), and this hides the exact size.
+local function bucketLen(x)
+  local b = 1
+  while b < x do b = b * 2 end
+  return b
+end
 local numExpr = load("util").numExpr
 
 -- Base85 for the proto blobs. The alphabet is the printable ASCII range
@@ -49,7 +56,8 @@ local randomByteKey, randomIdent, shuffledRange = _util.randomByteKey, _util.ran
 --------------------------------------------------------------------
 
 local function addConst(mod, value)
-  local key = type(value) .. ":" .. tostring(value)
+  -- Distinct numbers must get distinct keys (see compiler.lua).
+  local key = type(value) .. ":" .. (type(value) == "number" and (((math.type and math.type(value) == "integer") and string.format("%d", value)) or string.format("%.17g", value)) .. (math.type and math.type(value) or "") or tostring(value))
   local existing = mod.constIndex[key]
   if existing then return existing end
   mod.consts[#mod.consts + 1] = value
@@ -318,6 +326,7 @@ local function buildBundle(mod, opts)
   local tagPerm = shuffledRange(255)
   local tagN, tagS = tagPerm[1], tagPerm[2]
   local tagF, tagZ, tagNaN = tagPerm[3], tagPerm[4], tagPerm[5]
+  local tagI = tagPerm[6]
   local vaultData = buildVault(key)
   local cipherConsts = {}
   -- Number encoding is lossless. tostring() keeps only 14 digits and drops the
@@ -380,6 +389,9 @@ local function buildBundle(mod, opts)
         -- Lua 5.3: format the masked integer exactly. %.17g would convert it
         -- through a double and round values near 2^53.
         tagged = string.char(tagN) .. string.format("%d", v + maskA)
+      elseif math.type and isInteger(v) then
+        -- Lua 5.3 integers beyond 2^62: exact decimal text, unmasked.
+        tagged = string.char(tagI) .. string.format("%d", v)
       elseif isInteger(v) and v > -2^52 and v < 2^52 then
         -- Lua 5.1 (no integer subtype): every number is a double, and the
         -- masked sum stays exact in this range.
@@ -536,7 +548,7 @@ local function buildBundle(mod, opts)
       table.concat(paramParts, ","),
       proto.hasVararg and "true" or "false",
       rawF == 1 and "true" or "false",
-      psum, nonce, ih, #table.concat(raw), #blob, luaBytes(stored)
+      psum, nonce, ih, bucketLen(#table.concat(raw)), #blob, luaBytes(stored)
     )
   end
   checksum = keyedFinal(checksum, key)
@@ -569,7 +581,7 @@ local function buildBundle(mod, opts)
     sm1 = vaultData.sm1,
     sm2 = vaultData.sm2,
     vsum = vaultData.vsum,
-    tagN = tagN, tagF = tagF, tagZ = tagZ, tagNaN = tagNaN,
+    tagN = tagN, tagF = tagF, tagZ = tagZ, tagNaN = tagNaN, tagI = tagI,
     tagS = tagS,
     antiIdx = antiIdx,
     saltM3 = saltM3, stepA = stepA, stepB = stepB, stepC = stepC,

@@ -172,7 +172,7 @@ local function obfuscateOnce(source, chunkname, opts)
     return nameCache[tok]
   end
   local engineSrc = renderTemplate(vmSrc, bundle.OPNUM, bundle.BINNUM, bundle.UNNUM, totalInstr, opts.antiDebug,
-    { mba = opts.mba ~= false, M1 = bundle.saltM1, M2 = bundle.saltM2, M3 = bundle.saltM3, SA = bundle.stepA, SB = bundle.stepB, SC = bundle.stepC, MOD = bundle.mod, strength = opts.strength or 1,
+    { mba = opts.mba ~= false, mbaLimit = opts.mbaLimit, M1 = bundle.saltM1, M2 = bundle.saltM2, M3 = bundle.saltM3, SA = bundle.stepA, SB = bundle.stepB, SC = bundle.stepC, MOD = bundle.mod, strength = opts.strength or 1,
       proxify = opts.proxify and true or false, PA = proxyA, PB = proxyB, PM = PROXY_M,
       freeKey = bundle.freeKey, decoyCount = bundle.decoyCount,
       flush = opts.flushConsts and true or false, flushEvery = opts.flushEvery or 65536,
@@ -232,6 +232,7 @@ local function obfuscateOnce(source, chunkname, opts)
   header = header:gsub("__XS_TAGF__", tostring(bundle.tagF))
   header = header:gsub("__XS_TAGZ__", tostring(bundle.tagZ))
   header = header:gsub("__XS_TAGNAN__", tostring(bundle.tagNaN))
+  header = header:gsub("__XS_TAGI__", tostring(bundle.tagI))
   for nm, idx in pairs(bundle.antiIdx) do
     header = header:gsub("__XS_NM_" .. nm:upper() .. "__", numExpr(idx))
   end
