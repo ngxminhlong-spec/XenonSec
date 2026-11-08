@@ -367,4 +367,13 @@ do
   check("each proto has its own odd register multiplier", #ras >= 3 and allOdd and count == #ras,
     ("protos=%d distinct=%d"):format(#ras, count))
 end
+do
+  -- Option values are written into generated source: a string holding code must
+  -- not get into the output. mbaLimit must be a number; booleans are coerced.
+  local okNum, errNum = pcall(Obf.obfuscate, "print(1)", "t", { mbaLimit = "-1 then os.exit() end if _Z" })
+  check("mbaLimit string holding code is rejected", not okNum and tostring(errNum):find("mbaLimit") ~= nil)
+  local out = Obf.obfuscate("print(1)", "t", { antiDebug = "true or os.exit()", antiTamper = "x" })
+  check("boolean options cannot inject code", out:find("os.exit", 1, true) == nil)
+end
+
 print(pass .. " / " .. total .. " pass-level tests passed")

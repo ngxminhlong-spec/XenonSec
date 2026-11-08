@@ -86,6 +86,17 @@ local DEFAULTS = {
   strength = 2,        -- 1..4: scales decoy handlers and decoy constants (size vs. clutter)
 }
 
+-- mbaLimit is written into generated Lua source, so it must be a plain number.
+-- Anything else (for example a string holding code) is rejected up front.
+local function checkMbaLimit(v)
+  if v == nil then return nil end
+  local n = type(v) == "number" and v or nil
+  if not n or n ~= math.floor(n) or n < 1 or n > 4503599627370496 then
+    error("mbaLimit must be an integer in [1, 2^52]", 3)
+  end
+  return n
+end
+
 local function obfuscateOnce(source, chunkname, opts)
   opts = opts or {}
   setCipherParams() -- fresh cipher constants for every build (before any encryption)
@@ -189,7 +200,7 @@ local function obfuscateOnce(source, chunkname, opts)
     return nameCache[tok]
   end
   local engineSrc = renderTemplate(vmSrc, bundle.OPNUM, bundle.BINNUM, bundle.UNNUM, totalInstr, opts.antiDebug,
-    { mba = opts.mba ~= false, mbaLimit = opts.mbaLimit, M1 = bundle.saltM1, M2 = bundle.saltM2, M3 = bundle.saltM3, SA = bundle.stepA, SB = bundle.stepB, SC = bundle.stepC, MOD = bundle.mod, strength = opts.strength or 1,
+    { mba = opts.mba ~= false, mbaLimit = checkMbaLimit(opts.mbaLimit), M1 = bundle.saltM1, M2 = bundle.saltM2, M3 = bundle.saltM3, SA = bundle.stepA, SB = bundle.stepB, SC = bundle.stepC, MOD = bundle.mod, strength = opts.strength or 1,
       proxify = opts.proxify and true or false, PA = proxyA, PB = proxyB, PM = PROXY_M,
       freeKey = bundle.freeKey, decoyCount = bundle.decoyCount,
       flush = opts.flushConsts and true or false, flushEvery = opts.flushEvery or 65536,
@@ -283,8 +294,8 @@ local function obfuscateOnce(source, chunkname, opts)
   header = header:gsub("__XS_ESC__", function() return escLit end)
   header = header:gsub("__XS_PROTOS__", (protosLit:gsub("%%", "%%%%")))
   header = header:gsub("__XS_CHECKSUM__", tostring(bundle.checksum))
-  header = header:gsub("__XS_ANTITAMPER_ON__", tostring(opts.antiTamper))
-  header = header:gsub("__XS_ANTIDEBUG__", tostring(opts.antiDebug))
+  header = header:gsub("__XS_ANTITAMPER_ON__", opts.antiTamper and "true" or "false")
+  header = header:gsub("__XS_ANTIDEBUG__", opts.antiDebug and "true" or "false")
   header = header:gsub("__XS_WMIDX__", numExpr(bundle.watermarkIdx))
   header = header:gsub("__XS_DECMAIN__", numExpr(bundle.decMain))
   header = header:gsub("__XS_GROOT__", function() return resolveShared("stdG") end)
