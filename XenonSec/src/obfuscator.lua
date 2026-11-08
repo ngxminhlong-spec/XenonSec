@@ -294,6 +294,13 @@ local function obfuscateOnce(source, chunkname, opts)
   header = header:gsub("__XS_ESC__", function() return escLit end)
   header = header:gsub("__XS_PROTOS__", (protosLit:gsub("%%", "%%%%")))
   header = header:gsub("__XS_CHECKSUM__", tostring(bundle.checksum))
+  -- Anti-debug boot tokens by check index (empty when anti-debug is off).
+  local adTokParts = {}
+  for ci = 1, 14 do
+    if bundle.adTokens[ci] then adTokParts[#adTokParts + 1] = "[" .. ci .. "]=" .. bundle.adTokens[ci] end
+  end
+  local adTokLit = "({" .. table.concat(adTokParts, ",") .. "})"
+  header = header:gsub("__XS_ADTOKS__", function() return adTokLit end)
   header = header:gsub("__XS_ANTITAMPER_ON__", opts.antiTamper and "true" or "false")
   header = header:gsub("__XS_ANTIDEBUG__", opts.antiDebug and "true" or "false")
   header = header:gsub("__XS_WMIDX__", numExpr(bundle.watermarkIdx))

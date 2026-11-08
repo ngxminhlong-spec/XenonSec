@@ -35,10 +35,14 @@ local %kmap% = { __XS_KMAP__ }
 local %sm1%, %sm2% = __XS_SM1__, __XS_SM2__
 local %vsum% = __XS_VSUM__
 local %kbad% = false
--- Anti-debug state. %adMix% is the sum of the check results (0 while nothing
--- is seen); %buildKey% folds it into the key. %adStep% is assigned in the
--- anti-debug block below and called from several places in the code.
+-- Anti-debug state. Each check result is added to three accumulators, one
+-- per key family: %adMix% (static constants and the checksum), %adMixP%
+-- (proto keys) and %adMixS% (per-site constant keys). The anti-debug block
+-- adds each check's build-time token at boot, so every family depends on
+-- every check having run. %adStep% is assigned in that block.
 local %adMix% = 0
+local %adMixP% = 0
+local %adMixS% = 0
 local %adStep% = function() end
 
 -- Tripwire: a weighted sum over the whole vault. Editing any byte changes it,
@@ -49,7 +53,11 @@ local function %vaultOk%()
   return %vs% == %vsum%
 end
 
-local function %buildKey%()
+-- Rebuilds a key from the vault, shifted by the given state. Clean builds
+-- have state zero and the key is unchanged. Otherwise the shift is 1..255,
+-- and XOR with a nonzero value changes every byte, so no state value (even a
+-- multiple of 256) can leave the key clean.
+local function %keyFrom%(%st%)
   local %n% = math.floor(#%kmap% / 3)
   local %k% = {}
   for %i% = 1, %n% do
@@ -61,15 +69,23 @@ local function %buildKey%()
     local %c% = (%vault%[%pc%] - (%pc% * %sm1% + %sm2%) % 256) % 256
     %k%[%i%] = %bxor%(%bxor%(%a%, %b%), %c%)
   end
-  -- Clean builds: the state is zero and the key is unchanged. Otherwise the
-  -- shift is 1..255, and XOR with a nonzero value changes every byte, so no
-  -- state value (even a multiple of 256) can leave the key clean.
-  local %st% = %adMix% + (%kbad% and 1 or 0)
   if %st% ~= 0 then
     local %sh% = (%st% % 255) + 1
     for %i% = 1, %n% do %k%[%i%] = %bxor%(%k%[%i%], %sh%) end
   end
   return %k%
+end
+
+-- The three key families. Each one folds in its own accumulator and the
+-- poison flag.
+local function %buildKey%()
+  return %keyFrom%(%adMix% + (%kbad% and 1 or 0))
+end
+local function %buildKeyP%()
+  return %keyFrom%(%adMixP% + (%kbad% and 1 or 0))
+end
+local function %buildKeyS%()
+  return %keyFrom%(%adMixS% + (%kbad% and 1 or 0))
 end
 
 -- Keyed finalizer: the checksum is folded through the key, so it only
@@ -227,7 +243,8 @@ local %rawdec%
 end
 local %protos% = { __XS_PROTOS__ }
 -- Anti-debug names are encrypted constants, decoded only when used.
-local function %dname%(%di%) return (%rawdec%(%di%):sub(2)) end
+-- Read before the boot pass fills the key accumulators, so the raw key.
+local function %dname%(%di%) return (%decodeK%(%escC%[%di%], %keyFrom%(0)):sub(2)) end
 
 -- Per-proto key: the build key mixed with the proto's nonce, using the same
 -- LCG as the key seed. Mirrors deriveProtoKey in bundle.lua.
@@ -247,7 +264,7 @@ end
 -- the decode state is replayed along the code. The rebuilt tuples are checked
 -- against the stored hash (field i) before anything can run them.
 local function %dproto%(%pr%)
-  local %pk% = %pkey%(%buildKey%(), %pr%.n)
+  local %pk% = %pkey%(%buildKeyP%(), %pr%.n)
   -- Runtime-decoder protos are stored as bytes and without compression: they
   -- are what decodes and decompresses everything else. Other protos are
   -- base85 text (decoded by the runtime decoder unit) over the cipher blob.
@@ -355,7 +372,6 @@ local function %verify%()
   return (not __XS_ANTITAMPER_ON__) or (%fin%(%h%, %buildKey%()) == __XS_CHECKSUM__)
 end
 
-if not %verify%() then %corrupt%() end
 
 --------------------------------------------------------------------
 -- Anti-debug (opt-in, see --antidebug): a debug hook set on this
@@ -399,7 +415,10 @@ local %SETG% = function(%k%, %v%)
   else %priv%[%k%] = (%v% == nil) and %NILH% or %v% end
 end
 
+-- Anti-debug block: its boot pass fills the key accumulators, so it must run
+-- before the checksum verify, which derives a key.
 __XS_ADBLOCK__
+if not %verify%() then %corrupt%() end
 
 -- Constants are decrypted on first use and cached, so a constant the
 -- program never touches is never decrypted at all.
@@ -438,7 +457,7 @@ local function %cgetF%(%ct%, %ci%, %st%)
   if %ci% <= __XS_NSTATIC__ then return %ct%[%ci%] end
   local %v% = %sc%[%ci%]
   if %v% == nil then
-    %v% = %constval%(%decodeK%(%mkLzd%()[2](%raw%[%ci%], %clens%[%ci%]), %pkey%(%buildKey%(), %st%)))
+    %v% = %constval%(%decodeK%(%mkLzd%()[2](%raw%[%ci%], %clens%[%ci%]), %pkey%(%buildKeyS%(), %st%)))
     %sc%[%ci%] = %v%
   end
   return %v%

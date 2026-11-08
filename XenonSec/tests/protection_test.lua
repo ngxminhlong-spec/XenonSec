@@ -448,5 +448,35 @@ do
   check("anti-debug build has the bytecode-hash prefix", ad:find("\\027Lua", 1, true) ~= nil)
 end
 
+do
+  -- Every check's boot token is folded into the keys, so skipping one check
+  -- must break decoding elsewhere in the program, not only that check.
+  local src = 'local t = {} for i = 1, 3 do t[#t + 1] = i * 7 + 1000 end print(table.concat(t, " "), "marker")'
+  local expected = "1007 1014 1021\tmarker"
+  local out = Obf.obfuscate(src, "t", { antiDebug = true })
+  local function runOutput(code)
+    local captured = {}
+    local realPrint = print
+    print = function(...)
+      local p = {}
+      for i = 1, select("#", ...) do p[i] = tostring((select(i, ...))) end
+      captured[#captured + 1] = table.concat(p, "\t")
+    end
+    local chunk = load(code, "t")
+    local ok, err = pcall(chunk)
+    print = realPrint
+    return ok, captured[1], err
+  end
+  local ok, got = runOutput(out)
+  check("unpatched anti-debug build prints the expected values", ok and got == expected,
+    "ok=" .. tostring(ok) .. " got=" .. tostring(got))
+  -- The boot loop runs checks 1..5 once each; start it at 2 to skip check 1.
+  local patched, n = out:gsub("for (%w+)=1,5 do (%w+)%(%1,true%)end", "for %1=2,5 do %2(%1,true)end")
+  check("boot loop is found for patching", n == 1, "n=" .. n)
+  local okP, gotP, errP = runOutput(patched)
+  check("skipping one check's boot pass breaks decoding elsewhere",
+    not okP or gotP ~= expected, "ok=" .. tostring(okP) .. " got=" .. tostring(gotP) .. " err=" .. tostring(errP))
+end
+
 print()
 print(pass .. " / " .. total .. " anti-tamper/anti-debug tests passed")

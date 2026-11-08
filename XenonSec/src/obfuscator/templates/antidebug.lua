@@ -39,8 +39,8 @@ if __XS_ANTIDEBUG__ then
 end
 
 -- Each check returns a number: 0 when it sees nothing, nonzero when it does.
--- Nothing branches on a check's outcome. The result is summed into %adMix%
--- and the key is derived from it, so removing one check's effect changes the
+-- Nothing branches on a check's outcome. The result is summed into the key
+-- accumulators (see %adAdd%) and the keys are derived from them, so removing one check's effect changes the
 -- decoded values, not just one flag. Each check takes its inputs as a table,
 -- so the same code runs on the live environment and on the mocks below.
 -- 1: a debug hook is set on the main thread.
@@ -148,30 +148,46 @@ local function %ckDump%(%f%)
   return %h%
 end
 
+-- Each result goes to all three key families (see the header): the static
+-- constants and checksum (%adMix%), the protos (%adMixP%, weighted 3) and the
+-- per-site constants (%adMixS%, weighted 5). Only the boot pass (boot = true)
+-- adds the check's build-time token, so every family needs every check to
+-- have run once before its key can be derived. Later random runs add only
+-- their detection result, which is zero on a clean run.
+local function %adAdd%(%d%)
+  %adMix% = %adMix% + %d%
+  %adMixP% = %adMixP% + %d% * 3
+  %adMixS% = %adMixS% + %d% * 5
+end
+
 -- Index 1-4: run a check on the live inputs. Index 5: the known-answer
 -- self-test. Index 11-14: the code hash of check 1-4 (kept off the decoders'
 -- path, since hashing is much more work than a live check). A disagreement
 -- adds to the state.
-%adStep% = function(%si%)
+%adStep% = function(%si%, %boot%)
   if not __XS_ANTIDEBUG__ then return end
+  local %tok% = 0
+  if %boot% then %tok% = __XS_ADTOKS__[%si%] end
   if %si% > 10 then
     local %k% = %si% - 10
     local %want% = %CKH%[%k%]
+    local %d% = 0
     if %want% and %want% ~= 0 then
       local %got% = %ckDump%(%CKS%[%k%])
-      if %got% and %got% ~= %want% then %adMix% = %adMix% + 113 end
+      if %got% and %got% ~= %want% then %d% = 113 end
     end
+    %adAdd%(%d% + %tok%)
     return
   end
   if %si% == 5 then
-    %adMix% = %adMix% + %selfTest%() * 127
+    %adAdd%(%selfTest%() * 127 + %tok%)
     return
   end
-  %adMix% = %adMix% + %CKS%[%si%](%realEnv%())
+  %adAdd%(%CKS%[%si%](%realEnv%()) + %tok%)
 end
 if __XS_ANTIDEBUG__ then
-  for %sk% = 1, 5 do %adStep%(%sk%) end
-  for %sk% = 11, 14 do %adStep%(%sk%) end
+  for %sk% = 1, 5 do %adStep%(%sk%, true) end
+  for %sk% = 11, 14 do %adStep%(%sk%, true) end
 end
 
 ]===]

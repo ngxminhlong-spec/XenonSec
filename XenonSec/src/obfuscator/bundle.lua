@@ -252,7 +252,8 @@ local function buildBundle(mod, opts)
   local escSet = {}
   escSet[watermarkIdx] = true
   escSet[threeIdx] = true
-  for _, idx in pairs(antiIdx) do escSet[idx] = true end
+  local antiSet = {}
+  for _, idx in pairs(antiIdx) do escSet[idx] = true; antiSet[idx] = true end
   for pi = mod.rawFirst or 1, mod.rawLast or 0 do
     local proto = mod.protos[pi]
     for _, instr in ipairs(proto.code) do
@@ -328,6 +329,27 @@ local function buildBundle(mod, opts)
   local tagF, tagZ, tagNaN = tagPerm[3], tagPerm[4], tagPerm[5]
   local tagI = tagPerm[6]
   local vaultData = buildVault(key)
+  -- Anti-debug tokens: each check that runs at boot adds a build-time token
+  -- to all three key accumulators in the runtime (see antidebug.lua). The
+  -- three keys below are what the runtime derives when every check runs and
+  -- reports clean; the accumulators weight the tokens 1, 3 and 5.
+  local adTokens, tokSum = {}, 0
+  if opts.antiDebug then
+    for _, ci in ipairs({ 1, 2, 3, 4, 5, 11, 12, 13, 14 }) do
+      adTokens[ci] = math.random(1, 1048575)
+      tokSum = tokSum + adTokens[ci]
+    end
+  end
+  local function shiftKey(k, st)
+    if st == 0 then return k end
+    local sh = (st % 255) + 1
+    local out = {}
+    for i = 1, #k do out[i] = xor8(k[i], sh) end
+    return out
+  end
+  local keyA = shiftKey(key, tokSum)       -- static constants, checksum
+  local keyP = shiftKey(key, 3 * tokSum)   -- proto keys
+  local keyS = shiftKey(key, 5 * tokSum)   -- per-site constant keys
   local cipherConsts = {}
   -- Number encoding is lossless. tostring() keeps only 14 digits and drops the
   -- sign of -0.0, so:
@@ -368,12 +390,12 @@ local function buildBundle(mod, opts)
     end
   end
 
-  local function deriveProtoKey(nonce)
+  local function deriveProtoKey(nonce, base)
     local s = (CIPHER.basis + nonce) % 16777216
     local out = {}
-    for i = 1, #key do
+    for i = 1, #base do
       s = (s * CIPHER.mult + CIPHER.add) % 16777216
-      out[i] = xor8(key[i], math.floor(s / 65536) % 256)
+      out[i] = xor8(base[i], math.floor(s / 65536) % 256)
     end
     return out
   end
@@ -402,7 +424,10 @@ local function buildBundle(mod, opts)
     else
       tagged = string.char(tagS) .. v
     end
-    cipherConsts[i] = cipherEncrypt(tagged, siteState[i] and deriveProtoKey(siteState[i]) or key)
+    -- Anti-debug names are read before the boot pass has added its tokens,
+    -- so they use the raw key (see %dname% in the header).
+    local ck = antiSet[i] and key or (siteState[i] and deriveProtoKey(siteState[i], keyS) or keyA)
+    cipherConsts[i] = cipherEncrypt(tagged, ck)
   end
 
   -- 4.5. Opcode encoding. Every stored opcode is (key + salt(ip)) mod MOD,
@@ -524,7 +549,7 @@ local function buildBundle(mod, opts)
     end
     local body = table.concat(raw)
     if rawF == 0 then body = lzmaCompress(body, mod.lzD) end
-    local blob = cipherEncrypt(body, deriveProtoKey(nonce))
+    local blob = cipherEncrypt(body, deriveProtoKey(nonce, keyP))
     -- Runtime-decoder protos are stored as bytes; the rest as base85 text.
     local stored = (rawF == 1) and blob or encodeB85(blob)
 
@@ -555,7 +580,7 @@ local function buildBundle(mod, opts)
       psum, ra, rb, nonce, ih, bucketLen(#table.concat(raw)), #blob, luaBytes(stored)
     )
   end
-  checksum = keyedFinal(checksum, key)
+  checksum = keyedFinal(checksum, keyA)
 
   return {
     cipherConsts = cipherConsts,
@@ -568,6 +593,7 @@ local function buildBundle(mod, opts)
     saltM2 = saltM2,
     mod = MOD,
     key = key,
+    adTokens = adTokens,
     maskA = maskA,
     protoLits = protoLits,
     mainProto = mod.mainProto,
