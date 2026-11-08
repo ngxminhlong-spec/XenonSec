@@ -374,6 +374,9 @@ do
   check("mbaLimit string holding code is rejected", not okNum and tostring(errNum):find("mbaLimit") ~= nil)
   local out = Obf.obfuscate("print(1)", "t", { antiDebug = "true or os.exit()", antiTamper = "x" })
   check("boolean options cannot inject code", out:find("os.exit", 1, true) == nil)
+  -- A float mbaLimit must be written as the exact integer bound. tostring() would
+  -- print 2^52 as 4.5035996273705e+15, which is 4503599627370500: a different bound.
+  local out = Obf.obfuscate("print(1)", "t", { mbaLimit = 4503599627370496.0 })
+  check("float mbaLimit renders as the exact bound", out:find("x >= 4503599627370496 or", 1, true) ~= nil)
 end
-
 print(pass .. " / " .. total .. " pass-level tests passed")
