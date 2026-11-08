@@ -220,34 +220,159 @@ local function %pkey%(%key%, %nn%)
   return %pko%
 end
 
--- LZSS decoder, mirror of lzCompress in bundle.lua: a 4-byte raw length, then
--- flag-byte groups of literals (bit clear) and 2-byte matches (bit set).
+-- LZMA1 decoder (lc=3, lp=0, pb=2), mirror of src/obfuscator/lzma.lua. The
+-- input is a 4-byte raw length followed by the raw LZMA stream; the stream's
+-- first byte is always 0 and is skipped. Probability slots share one table
+-- whose default is 1024 (the layout is documented in lzma.lua).
 local function %lzd%(%s%)
   local %n% = %byte%(%s%, 1) * 16777216 + %byte%(%s%, 2) * 65536 + %byte%(%s%, 3) * 256 + %byte%(%s%, 4)
+  local %P% = setmetatable({}, { __index = function() return 1024 end })
+  local %ip% = 6
+  local %rg% = 4294967295
+  local %cd% = 0
+  for _ = 1, 4 do
+    %cd% = %cd% * 256 + %byte%(%s%, %ip%)
+    %ip% = %ip% + 1
+  end
+
+  local function %bit%(%i%)
+    local %pr% = %P%[%i%]
+    local %bd% = math.floor(%rg% / 2048) * %pr%
+    local %b% = 1
+    if %cd% < %bd% then
+      %rg% = %bd%
+      %P%[%i%] = %pr% + math.floor((2048 - %pr%) / 32)
+      %b% = 0
+    else
+      %rg% = %rg% - %bd%
+      %cd% = %cd% - %bd%
+      %P%[%i%] = %pr% - math.floor(%pr% / 32)
+    end
+    if %rg% < 16777216 then
+      %rg% = %rg% * 256
+      %cd% = %cd% * 256 + (%byte%(%s%, %ip%) or 0)
+      %ip% = %ip% + 1
+    end
+    return %b%
+  end
+
+  local function %dir%(%nb%)
+    local %v% = 0
+    for _ = 1, %nb% do
+      %rg% = math.floor(%rg% / 2)
+      %v% = %v% * 2
+      if %cd% >= %rg% then
+        %cd% = %cd% - %rg%
+        %v% = %v% + 1
+      end
+      if %rg% < 16777216 then
+        %rg% = %rg% * 256
+        %cd% = %cd% * 256 + (%byte%(%s%, %ip%) or 0)
+        %ip% = %ip% + 1
+      end
+    end
+    return %v%
+  end
+
+  local function %tr%(%base%, %nb%)
+    local %m% = 1
+    for _ = 1, %nb% do %m% = %m% * 2 + %bit%(%base% + %m%) end
+    return %m% - 2 ^ %nb%
+  end
+
+  local function %rt%(%base%, %nb%)
+    local %m% = 1
+    local %sym% = 0
+    for %i% = 0, %nb% - 1 do
+      local %b% = %bit%(%base% + %m%)
+      %m% = %m% * 2 + %b%
+      %sym% = %sym% + %b% * 2 ^ %i%
+    end
+    return %sym%
+  end
+
+  local function %ln%(%base%, %ps%)
+    if %bit%(%base%) == 0 then return %tr%(%base% + 2 + %ps% * 8, 3) end
+    if %bit%(%base% + 1) == 0 then return 8 + %tr%(%base% + 130 + %ps% * 8, 3) end
+    return 16 + %tr%(%base% + 258, 8)
+  end
+
+  local function %dd%(%len%)
+    local %slot% = %tr%(432 + (%len% < 3 and %len% or 3) * 64, 6)
+    if %slot% < 4 then return %slot% end
+    local %nd% = math.floor(%slot% / 2) - 1
+    local %dist% = (2 + %slot% % 2) * 2 ^ %nd%
+    if %slot% < 14 then
+      return %dist% + %rt%(688 + %dist% - %slot%, %nd%)
+    end
+    local %dr% = %dir%(%nd% - 4)
+    local %al% = %rt%(832, 4)
+    return %dist% + %dr% * 16 + %al%
+  end
+
   local %out% = {}
-  local %len% = 0
-  local %p% = 5
-  while %len% < %n% do
-    local %fl% = %byte%(%s%, %p%)
-    %p% = %p% + 1
-    for %bit% = 0, 7 do
-      if %len% >= %n% then break end
-      if math.floor(%fl% / 2 ^ %bit%) % 2 == 0 then
-        %len% = %len% + 1
-        %out%[%len%] = %byte%(%s%, %p%)
-        %p% = %p% + 1
+  local %ol% = 0
+  local %st% = 0
+  local %r0%, %r1%, %r2%, %r3% = 0, 0, 0, 0
+  while %ol% < %n% do
+    local %ps% = %ol% % 4
+    if %bit%(%st% * 16 + %ps%) == 0 then
+      local %pb% = %ol% > 0 and %out%[%ol%] or 0
+      local %base% = 1876 + 768 * math.floor(%pb% / 32)
+      local %sy% = 1
+      if %st% < 7 then
+        while %sy% < 256 do %sy% = %sy% * 2 + %bit%(%base% + %sy%) end
       else
-        local %b1% = %byte%(%s%, %p%)
-        local %b2% = %byte%(%s%, %p% + 1)
-        %p% = %p% + 2
-        local %dist% = %b1% + math.floor(%b2% / 16) * 256 + 1
-        for %k% = 1, %b2% % 16 + 3 do
-          %len% = %len% + 1
-          %out%[%len%] = %out%[%len% - %dist%]
+        local %mb% = %out%[%ol% - %r0%]
+        local %mt% = true
+        while %mt% and %sy% < 256 do
+          local %mbit% = math.floor(%mb% / 128) % 2
+          %mb% = (%mb% * 2) % 256
+          local %bb% = %bit%(%base% + (1 + %mbit%) * 256 + %sy%)
+          %sy% = %sy% * 2 + %bb%
+          if %bb% ~= %mbit% then %mt% = false end
+        end
+        while %sy% < 256 do %sy% = %sy% * 2 + %bit%(%base% + %sy%) end
+      end
+      %ol% = %ol% + 1
+      %out%[%ol%] = %sy% - 256
+      %st% = %st% < 4 and 0 or (%st% < 10 and %st% - 3 or %st% - 6)
+    else
+      local %cl% = nil
+      if %bit%(192 + %st%) == 0 then
+        %cl% = %ln%(848, %ps%)
+        %st% = %st% < 7 and 7 or 10
+        %r3%, %r2%, %r1% = %r2%, %r1%, %r0%
+        %r0% = %dd%(%cl%)
+      elseif %bit%(204 + %st%) == 0 then
+        if %bit%(240 + %st% * 16 + %ps%) == 0 then
+          %st% = %st% < 7 and 9 or 11
+          %ol% = %ol% + 1
+          %out%[%ol%] = %out%[%ol% - %r0% - 1]
+        else
+          %st% = %st% < 7 and 8 or 11
+          %cl% = %ln%(1362, %ps%)
+        end
+      else
+        if %bit%(216 + %st%) == 0 then
+          %r0%, %r1% = %r1%, %r0%
+        elseif %bit%(228 + %st%) == 0 then
+          %r0%, %r1%, %r2% = %r2%, %r0%, %r1%
+        else
+          %r0%, %r1%, %r2%, %r3% = %r3%, %r0%, %r1%, %r2%
+        end
+        %st% = %st% < 7 and 8 or 11
+        %cl% = %ln%(1362, %ps%)
+      end
+      if %cl% then
+        for _ = 1, %cl% + 2 do
+          %ol% = %ol% + 1
+          %out%[%ol%] = %out%[%ol% - %r0% - 1]
         end
       end
     end
   end
+
   local %chars% = {}
   for %i% = 1, %n% do %chars%[%i%] = %char%(%out%[%i%]) end
   return %concat%(%chars%)
