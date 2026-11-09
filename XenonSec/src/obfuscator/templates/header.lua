@@ -44,6 +44,9 @@ local %adMix% = 0
 local %adMixP% = 0
 local %adMixS% = 0
 local %adStep% = function() end
+-- Decode-state chain start, set by the boot pass (zero when anti-debug is off).
+local %bootSt% = 0
+local function %chainInit%() return %bootSt% end
 
 -- Tripwire: a weighted sum over the whole vault. Editing any byte changes it,
 -- which marks the key bad (see %corrupt%).
@@ -282,7 +285,7 @@ local function %dproto%(%pr%)
   local %canon% = __XS_CANONH__
   local %rst% = __XS_RESETH__
   local %sd% = %pr%.n
-  local %cur% = 0
+  local %cur% = %chainInit%()
   local function %fld%(%base%, %j%)
     local %o% = %base% + (%j% - 1) * 3
     return %byte%(%raw%, %o% + 1) * 65536 + %byte%(%raw%, %o% + 2) * 256 + %byte%(%raw%, %o% + 3)
@@ -305,7 +308,7 @@ local function %dproto%(%pr%)
     local %e4% = %ef%(%c%, %seed%, 4, %cur%)
     %code%[%ci%] = { %e1%, %e2%, %e3%, %e4%, %seed% }
     %hm%(%seed%); %hm%(%e1%); %hm%(%e2%); %hm%(%e3%); %hm%(%e4%)
-    if %rst%[%ca%] then %cur% = 0 else %cur% = (%cur% * __XS_STA__ + %ca% * __XS_STB__ + __XS_STC__) % __XS_FMOD__ end
+    if %rst%[%ca%] then %cur% = %chainInit%() else %cur% = (%cur% * __XS_STA__ + %ca% * __XS_STB__ + __XS_STC__) % __XS_FMOD__ end
   end
   if %dh% ~= %pr%.i then
     for %ci% = 1, #%code% do %code%[%ci%][1] = nil end
@@ -467,7 +470,7 @@ end
 -- protos are raw, so building it never recurses into this function.
 %mkLzd% = function()
   if not %lzdFn% then
-    %lzdFn% = %ENG%({ %escDec%, %protos%, __XS_DECMAIN__, %adStep%, %GETG%, %SETG%, %dproto%, %poison%, %cgetF%, %sc% })
+    %lzdFn% = %ENG%({ %escDec%, %protos%, __XS_DECMAIN__, %adStep%, %GETG%, %SETG%, %dproto%, %poison%, %cgetF%, %sc%, %chainInit% })
   end
   return %lzdFn%
 end

@@ -188,6 +188,8 @@ end
 if __XS_ANTIDEBUG__ then
   for %sk% = 1, 5 do %adStep%(%sk%, true) end
   for %sk% = 11, 14 do %adStep%(%sk%, true) end
+  -- Starts every decode-state chain (see chainInit in bundle.lua).
+  %bootSt% = (%adMix% * __XS_FSA__) % __XS_FMOD__
 end
 
 ]===]

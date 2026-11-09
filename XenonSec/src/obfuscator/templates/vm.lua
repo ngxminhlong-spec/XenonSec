@@ -71,6 +71,7 @@ local function %run%(%mod%, ...)
   local %cget% = %mod%[9]
   local %scache% = %mod%[10]
   local %adStep% = %mod%[4]
+  local %chainInit% = %mod%[11]
   local %GETG% = %mod%[5]
   local %SETG% = %mod%[6]
   local %brick% = function()
@@ -151,7 +152,7 @@ local function %run%(%mod%, ...)
       %code% = %proto%.c, %ip% = 1, %regs% = %NEWREGS%, %top% = 0,
       %scope% = { %varsField% = %NEWVARS%, %parentField% = %parentScope% },
       %va% = nil, %fin% = false, %ret% = nil, %pr% = 0,
-      %x2% = 0, %x3% = 0, %x4% = 0, %st% = 0,
+      %x2% = 0, %x3% = 0, %x4% = 0, %st% = %chainInit%(),
     }
     local %params% = %proto%.p
     for %pi% = 1, #%params% do

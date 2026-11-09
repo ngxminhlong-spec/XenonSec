@@ -350,6 +350,10 @@ local function buildBundle(mod, opts)
   local keyA = shiftKey(key, tokSum)       -- static constants, checksum
   local keyP = shiftKey(key, 3 * tokSum)   -- proto keys
   local keyS = shiftKey(key, 5 * tokSum)   -- per-site constant keys
+  -- Every decode-state chain starts here instead of at zero, so the boot
+  -- tokens also gate instruction decoding. The runtime starts its chains from
+  -- (boot sum * stepA) % MOD, which is zero when anti-debug is off.
+  local chainInit = (tokSum * stepA) % MOD
   local cipherConsts = {}
   -- Number encoding is lossless. tostring() keeps only 14 digits and drops the
   -- sign of -0.0, so:
@@ -377,9 +381,9 @@ local function buildBundle(mod, opts)
   local SITE_RESET = { JMP = true, JF = true, JT = true, JNIL = true, RET = true, RETM = true }
   for pi, proto in ipairs(mod.protos) do
     if not (pi >= (mod.rawFirst or 1) and pi <= (mod.rawLast or 0)) then
-      local cur = 0
+      local cur = chainInit
       for _, instr in ipairs(proto.code) do
-        if SITE_RESET[instr.op] then cur = 0 else cur = (cur * stepA + OPNUM[instr.op] * stepB + stepC) % MOD end
+        if SITE_RESET[instr.op] then cur = chainInit else cur = (cur * stepA + OPNUM[instr.op] * stepB + stepC) % MOD end
         local cf = constField(instr.op)
         if cf then
           shuffledConsts[#shuffledConsts + 1] = shuffledConsts[instr[cf]]
@@ -526,7 +530,7 @@ local function buildBundle(mod, opts)
     end
     local raw = {}
     local ih = 5381
-    local cur = 0 -- decode state seen by the next instruction
+    local cur = chainInit -- decode state seen by the next instruction
     local seedState = nonce
     for _, instr in ipairs(proto.code) do
       -- Park-Miller seed stream from the nonce; the runtime repeats this exactly.
@@ -545,7 +549,7 @@ local function buildBundle(mod, opts)
       ih = mixChecksum(ih, eb); ih = mixChecksum(ih, ec)
       -- Canonical opcode (not the alias) drives the chain, so rekeying an
       -- alias or seed never changes the state a running frame expects.
-      if STATE_RESET[instr.op] then cur = 0 else cur = (cur * stepA + OPNUM[instr.op] * stepB + stepC) % MOD end
+      if STATE_RESET[instr.op] then cur = chainInit else cur = (cur * stepA + OPNUM[instr.op] * stepB + stepC) % MOD end
     end
     local body = table.concat(raw)
     if rawF == 0 then body = lzmaCompress(body, mod.lzD) end
