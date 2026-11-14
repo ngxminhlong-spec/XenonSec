@@ -373,7 +373,7 @@ do
   -- the run compares it with the hash the build recorded (Lua 5.3 builds).
   if _VERSION == "Lua 5.3" then
     local src = 'print("clean run")'
-    local out = Obf.obfuscate(src, "t", { antiDebug = true })
+    local out = Obf.obfuscate(src, "t", { antiDebug = true, minify = false }) -- shape-based tamper target: plain literals
     local clean = load(out, "t")
     local captured = {}
     local realPrint = print
@@ -399,7 +399,7 @@ do
   -- edited check is still caught. This is the path that works on Lua 5.1 and
   -- Luau.
   local src = 'print("selftest run")'
-  local out = Obf.obfuscate(src, "t", { antiDebug = true })
+  local out = Obf.obfuscate(src, "t", { antiDebug = true, minify = false }) -- shape-based tamper target
   local off, nOff = out:gsub("\\027Lua", "\\000Lua", 1)
   check("bytecode-check prefix found in the output", nOff == 1, "n=" .. nOff)
   local function runOut(text)
@@ -453,7 +453,7 @@ do
   -- must break decoding elsewhere in the program, not only that check.
   local src = 'local t = {} for i = 1, 3 do t[#t + 1] = i * 7 + 1000 end print(table.concat(t, " "), "marker")'
   local expected = "1007 1014 1021\tmarker"
-  local out = Obf.obfuscate(src, "t", { antiDebug = true })
+  local out = Obf.obfuscate(src, "t", { antiDebug = true, minify = false }) -- boot loop is matched by shape
   local function runOutput(code)
     local captured = {}
     local realPrint = print
@@ -471,7 +471,7 @@ do
   check("unpatched anti-debug build prints the expected values", ok and got == expected,
     "ok=" .. tostring(ok) .. " got=" .. tostring(got))
   -- The boot loop runs checks 1..5 once each; start it at 2 to skip check 1.
-  local patched, n = out:gsub("for (%w+)=1,5 do (%w+)%(%1,true%)end", "for %1=2,5 do %2(%1,true)end")
+  local patched, n = out:gsub("for (%w+)%s*=%s*1%s*,%s*5%s*do%s*(%w+)%(%1%s*,%s*true%s*%)%s*end", "for %1=2,5 do %2(%1,true)end")
   check("boot loop is found for patching", n == 1, "n=" .. n)
   local okP, gotP, errP = runOutput(patched)
   check("skipping one check's boot pass breaks decoding elsewhere",
