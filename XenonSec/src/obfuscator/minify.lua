@@ -436,9 +436,12 @@ end
 -- A statement that never does anything: either an empty block, or an `if`
 -- whose condition is always false. n*(n+1) is even for every integer n.
 local function junkStatement()
-  if math.random(1, 2) == 1 then return "do end" end
+  local form = math.random(1, 3)
+  if form == 1 then return "do end" end
+  if form == 2 then return "while false do end" end
   local n = math.random(2, 99999)
-  return string.format("if (%s*(%s+1))%%2==1 then end", maskInt(n), maskInt(n))
+  local tail = math.random(1, 2) == 1 and "+1" or "-1"
+  return string.format("if (%s*(%s%s))%%2==1 then end", maskInt(n), maskInt(n), tail)
 end
 
 -- True when two adjacent token texts would otherwise merge or change meaning.

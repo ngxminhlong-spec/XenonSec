@@ -50,9 +50,12 @@ end
 -- A boolean written as arithmetic: n*(n+1) is even for every integer n, so
 -- the remainder is 0 (true) or 1 (false, never reached). Both n and the
 -- literals are masked, so the output has no plain true/false gate.
+-- Two identities with the same always-even product, picked per gate, so the
+-- gates do not all share one shape: n*(n+1) and n*(n-1) are both even.
+local OPAQUE_FORMS = { "+1", "-1" }
 local function opaqueBool(b)
   local n = math.random(2, 99999)
-  local product = "(" .. numExpr(n) .. "*(" .. numExpr(n) .. "+1))"
+  local product = "(" .. numExpr(n) .. "*(" .. numExpr(n) .. OPAQUE_FORMS[math.random(1, #OPAQUE_FORMS)] .. "))"
   return "(" .. product .. " % 2" .. (b and " == 0" or " == 1") .. ")"
 end
 local FOOTER_TEMPLATE = load("templates/footer")
@@ -336,6 +339,7 @@ local function obfuscateOnce(source, chunkname, opts)
   header = header:gsub("__XS_ANTITAMPER_ON__", function() return opaqueBool(opts.antiTamper and true or false) end)
   header = header:gsub("__XS_ANTIDEBUG__", function() return opaqueBool(opts.antiDebug and true or false) end)
   header = header:gsub("__XS_WMIDX__", numExpr(bundle.watermarkIdx))
+  header = header:gsub("__XS_WMTEXT__", function() return '"' .. _util.watermark() .. '"' end)
   header = header:gsub("__XS_DECMAIN__", numExpr(bundle.decMain))
   header = header:gsub("__XS_GROOT__", function() return resolveShared("stdG") end)
   header = header:gsub("__XS_NSTATIC__", numExpr(bundle.nStatic))
@@ -368,8 +372,12 @@ local function obfuscateOnce(source, chunkname, opts)
     for _, name in ipairs(ENV_CHECK_NAMES) do
       getters[#getters + 1] = "function() return " .. resolveShared("base") .. "[" .. escStr(name) .. "] end"
     end
-    return string.format('local __ty = %s[__XS_KS_type__] local __envg = {%s} for __i = 1, #__envg do if __ty(__envg[__i]()) ~= "function" then %s() end end',
-      resolveShared("base"), table.concat(getters, ", "), corrupt)
+    -- Local names are per-build random identifiers, and the block is scoped
+    -- with do ... end so none of them outlives the check.
+    local tyName, listName, idxName = randomIdent(), randomIdent(), randomIdent()
+    return string.format('do local %s = %s[__XS_KS_type__] local %s = {%s} for %s = 1, #%s do if %s(%s[%s]()) ~= "function" then %s() end end end',
+      tyName, resolveShared("base"), listName, table.concat(getters, ", "),
+      idxName, listName, tyName, listName, idxName, corrupt)
   end)
 
   local footer = substitute(footerTpl, function(tok)
@@ -401,12 +409,21 @@ local function obfuscateOnce(source, chunkname, opts)
   local function luaQuote(str)
     return '"' .. str:gsub("[%c\"\\\128-\255]", function(c) return string.format("\\%03d", c:byte()) end) .. '"'
   end
+  -- The outer wrapper is written in one of several equivalent spellings,
+  -- chosen per build, so the file does not start with the same text every time.
+  local wrapForms = {
+    { "return (function(...)\n", "\nend)(...)\n" },
+    { "return(function(...)\n", "\nend)(...)\n" },
+    { "return (function( ... )\n", "\nend ) ( ... )\n" },
+  }
+  local wrapForm = wrapForms[math.random(1, #wrapForms)]
+  local wrapHead, wrapTail = wrapForm[1], wrapForm[2]
   local ckHashes, dumpPrefix = { 0, 0, 0, 0 }, ""
   if opts.antiDebug and not useTypes and _VERSION == "Lua 5.3" then
     local zeroed = (header:gsub("__XS_CKH__", "0,0,0,0"))
     zeroed = (zeroed:gsub("__XS_DPFX__", '""'))
-    local probeSrc = "return (function(...)\n" .. zeroed .. "\nreturn " ..
-      resolveShared("CKS") .. "\nend)(...)\n"
+    local probeSrc = wrapHead .. zeroed .. "\nreturn " ..
+      resolveShared("CKS") .. wrapTail
     local fn, loadErr = _G.load(probeSrc, "=probe")
     assert(fn, "XenonSec: anti-debug probe failed to load: " .. tostring(loadErr))
     local okRun, checks = pcall(fn)
@@ -426,7 +443,7 @@ local function obfuscateOnce(source, chunkname, opts)
   header = header:gsub("__XS_DPFX__", (luaQuote(dumpPrefix):gsub("%%", "%%%%")))
 
   local combined = header .. "\n" .. footer
-  return "return (function(...)\n" .. combined .. "\nend)(...)\n"
+  return wrapHead .. combined .. wrapTail
 end
 
 -- Public entry point. Builds the protected file and, if the result is smaller
@@ -436,6 +453,7 @@ end
 -- (the CLI's --min-size) when a minimum file size is actually needed.
 local function obfuscate(source, chunkname, opts)
   opts = opts or {}
+  _util.newWatermark()  -- fresh watermark text for this build
   local target = opts.minSize
   if target == nil or target == false then target = 0 end
   local strength = opts.strength or 1

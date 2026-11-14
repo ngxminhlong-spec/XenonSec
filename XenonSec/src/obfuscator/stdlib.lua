@@ -152,26 +152,15 @@ local function buildStdBlock(tabName, list, names)
   local lines = {}
   -- Root of the lookups: on Lune and some sandboxes _G is an empty table, but
   -- getfenv(0) still reaches the globals; plain Lua has no getfenv, so _G there.
-  lines[#lines + 1] = string.format("local %s, %s = {}, (getfenv and getfenv(0)) or _G", tabName, names.G)
-  -- Bootstrap, found by behaviour rather than by name. Only string.char and
-  -- string.byte are called here: probing every string function with arbitrary
-  -- arguments at program start is unsafe (it corrupted memory in practice).
-  -- The string library is
-  -- reached through the string metatable, and string.char is the function that
-  -- gives "AB" for (65, 66); string.byte gives 65, 66 for ("AB", 1, 2).
-  lines[#lines + 1] = string.format(
-    'local %s, %s; do local %s, %s = __PCALL__, __GETMT__("").__index for _, %s in __PAIRS__({%s.char, %s.byte}) do if __TYPE__(%s) == "function" then local %s, %s = %s(%s, 65, 66) if %s and %s == "AB" then %s = %s end local %s, %s, %s = %s(%s, "AB", 1, 2) if %s and %s == 65 and %s == 66 then %s = %s end end end end',
-    names.byte, names.char,
-    names.pc, names.sm, names.f, names.sm, names.sm, names.f,
-    names.ok, names.r, names.pc, names.f, names.ok, names.r, names.char, names.f,
-    names.ok, names.r, names.j, names.pc, names.f, names.ok, names.r, names.j, names.byte, names.f)
-  -- Builtins the bootstrap needs are read from the root table with escaped
-  -- keys, so their names are not plain text in the output.
-  local BOOT_BUILTINS = { __PCALL__ = "pcall", __GETMT__ = "getmetatable", __PAIRS__ = "pairs", __TYPE__ = "type" }
-  lines[#lines] = lines[#lines]:gsub("__%u+__", function(tok)
-    local name = BOOT_BUILTINS[tok]
-    return names.G .. "[" .. ('"' .. name:gsub(".", function(c) return string.format("\\%03d", c:byte()) end) .. '"') .. "]"
-  end)
+  -- Three spellings of the same root expression (and/or binds tighter than
+  -- nothing else here), picked per build.
+  local rootForms = { "(getfenv and getfenv(0)) or _G", "getfenv and getfenv(0) or _G", "((getfenv and getfenv(0)) or _G)" }
+  lines[#lines + 1] = string.format("local %s, %s = {}, %s", tabName, names.G, rootForms[math.random(1, #rootForms)])
+  -- Bootstrap without builtins: the string library is reached through the
+  -- string metatable (("").char), so pcall, getmetatable, pairs and type are
+  -- not needed here at all. Every other std name goes through the decoder
+  -- below, which is defined before any of them is used.
+  lines[#lines + 1] = string.format('local %s, %s = ("").byte, ("").char', names.byte, names.char)
   -- Name decoder: builds the string byte by byte, so it needs no table library.
   -- Same recurrence as keystream() above: the state advances once per byte.
   local decTpl = "local function %s(%s, %s) local %s = \"\" for %s = 1, #%s do %s = (%s * 16807) %% 2147483647 %s = %s .. %s((%s[%s] - (%s - %s %% 65536) / 65536) %% 256) end return %s end"

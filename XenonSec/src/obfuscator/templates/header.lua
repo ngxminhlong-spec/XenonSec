@@ -483,8 +483,8 @@ end
 -- adding up for execution to continue past this point.
 do
   local %wmVal% = %consts%[__XS_WMIDX__]
-  local %wmChecked%, %wmCount% = %wmVal%:gsub("Protected by XenonSec", "Protected by XenonSec")
-  if %wmCount% ~= 1 or %wmChecked% ~= "Protected by XenonSec" then %corrupt%() end
+  local %wmChecked%, %wmCount% = %wmVal%:gsub(__XS_WMTEXT__, __XS_WMTEXT__)
+  if %wmCount% ~= 1 or %wmChecked% ~= __XS_WMTEXT__ then %corrupt%() end
 end
 
 if __XS_ANTIDEBUG__ then

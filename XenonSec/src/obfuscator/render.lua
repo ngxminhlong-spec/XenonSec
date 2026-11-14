@@ -49,7 +49,7 @@ local function renderSelfTest(ensureName, OPNUM, BINNUM, UNNUM, KV)
   local function group(callStr, cond)
     groups[#groups + 1] = { "    r, ip = " .. callStr, "    if not (" .. cond .. ") then return false end" }
   end
-  group(call(OPNUM.LOADK, "1", numOr(KV.wm), "0"), 'r[1] == "Protected by XenonSec" and ip == 2')
+  group(call(OPNUM.LOADK, "1", numOr(KV.wm), "0"), 'r[1] == "' .. _util.watermark() .. '" and ip == 2')
   group(call(OPNUM.LOADTRUE, "1", "0", "0"), "r[1] == true and ip == 2")
   group(call(OPNUM.LOADFALSE, "1", "0", "0"), "r[1] == false and ip == 2")
   group(call(OPNUM.LOADNIL, "1", "2", "0", "{[1]=5,[2]=6}"), "r[1] == nil and r[2] == nil and ip == 2")

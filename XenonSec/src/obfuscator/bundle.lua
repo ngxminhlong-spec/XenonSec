@@ -171,7 +171,7 @@ local function buildBundle(mod, opts)
   --       covered by the exact same checksum as everything else, so if
   --       it doesn't decode back to exactly the right text, that's the
   --       same signal as any other tamper -- not a separate mechanism.
-  local watermarkIdx = addConst(mod, "Protected by XenonSec")
+  local watermarkIdx = addConst(mod, _util.watermark())
   local antiPre = {}
   if opts.antiDebug then
     for _, nm in ipairs(ANTI_NAMES) do antiPre[nm] = addConst(mod, nm) end
