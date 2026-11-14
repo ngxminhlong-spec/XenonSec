@@ -126,7 +126,7 @@ do
   -- check (which hashes the live tuples) can catch it.
   local src = "local function f(n) local s = 0 for i = 1, n do s = s + i end return s end\n" ..
               "local t = 0 for i = 1, 30000 do t = t + f(3) end print('done', t)\n"
-  local out = Obf.obfuscate(src, "p", { minSize = false })
+  local out = Obf.obfuscate(src, "p", { minSize = false, minify = false }) -- hook matches the plain decode call shape
   -- The output is minified, so the spacing around = and ( is optional.
   local hooked, n = out:gsub("if not (%w+)%.c then (%w+)%.c%s*=%s*(%w+)%[7%]%((%w+)%)%s*end",
     function(a, b, mod, c)
@@ -324,10 +324,20 @@ do
   check("minify: Luau interpolated string", m("local s = `a{b}c`\nprint(s)") == "local s=`a{b}c`;print(s)")
   check("minify: Luau generic function type", m("local fn: <T>(T) -> T = id\nprint(fn)") == "local fn:<T>(T)->T=id;print(fn)")
   check("minify: Luau type alias and annotated function", m("type P = { x: number }\nfunction g(a: number): number\n  return a\nend\n") == "type P={x:number};function g(a:number):number return a end")
-  check("minify: small literals not masked", m("return 999", true) == "return 999")
-  local masked = m("return 5000", true)
-  local ok = masked:match("^return%(%(5000%+(%d+)%)%-(%d+)%)$")
-  check("minify: large literal masked as ((n+k)-k)", ok ~= nil)
+  check("minify: no literal rewriting without masking", m("return 999") == "return 999")
+  -- With masking on, every integer literal gets a random form. Each form must
+  -- evaluate to its value, and the forms must differ between calls.
+  local seen, allOk = {}, true
+  for _ = 1, 40 do
+    local a = m("return 5000", true)
+    seen[a] = true
+    local f = load(a)
+    allOk = allOk and f ~= nil and f() == 5000
+  end
+  check("minify: every masked literal evaluates to its value", allOk)
+  local distinct = 0
+  for _ in pairs(seen) do distinct = distinct + 1 end
+  check("minify: literal forms vary between calls", distinct > 1, "distinct=" .. distinct)
 end
 
 print()

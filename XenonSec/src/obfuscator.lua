@@ -34,6 +34,27 @@ local renderTemplate = _render.renderTemplate
 local buildStdBlock, encName, rewriteStd = _stdlib.buildStdBlock, _stdlib.encName, _stdlib.rewriteStd
 local minifyTemplateText, randomIdent, substitute = _util.minifyTemplateText, _util.randomIdent, _util.substitute
 local numExpr = _util.numExpr
+
+-- A name as a Lua string literal of decimal byte escapes: the name never
+-- appears as plain text in the output.
+local function escStr(name)
+  return '"' .. name:gsub(".", function(c) return string.format("\\%03d", c:byte()) end) .. '"'
+end
+
+-- Integer constants go through numExpr so their literal value never appears.
+local function numOr(v)
+  if math.type(v) == "integer" then return numExpr(v) end
+  return tostring(v)
+end
+
+-- A boolean written as arithmetic: n*(n+1) is even for every integer n, so
+-- the remainder is 0 (true) or 1 (false, never reached). Both n and the
+-- literals are masked, so the output has no plain true/false gate.
+local function opaqueBool(b)
+  local n = math.random(2, 99999)
+  local product = "(" .. numExpr(n) .. "*(" .. numExpr(n) .. "+1))"
+  return "(" .. product .. " % 2" .. (b and " == 0" or " == 1") .. ")"
+end
 local FOOTER_TEMPLATE = load("templates/footer")
 local HEADER_TEMPLATE = load("templates/header")
 local ANTIDEBUG_TEMPLATE = load("templates/antidebug")
@@ -210,6 +231,11 @@ local function obfuscateOnce(source, chunkname, opts)
       scatterType = scatterType,
       opGroups = bundle.opGroups, rekeySeed = math.random(1, 2147483646),
       shared = function(tok) return resolveShared(tok) end })
+  -- Hash constants used by the engine's own checksum functions, masked the
+  -- same way as the header's.
+  for tok, val in pairs({ __XS_MH__ = 2147483647, __XS_LCG__ = 16807, __XS_H31__ = 31 }) do
+    engineSrc = engineSrc:gsub(tok, function() return numExpr(val) end)
+  end
 
   local vaultLit = table.concat(bundle.vault, ",")
   local kmapLit = table.concat(bundle.kmap, ",")
@@ -252,29 +278,35 @@ local function obfuscateOnce(source, chunkname, opts)
   header = rewriteStd(header, stdTab, stdList, stdIndex)
   header = header:gsub("__XS_VAULT__", vaultLit)
   header = header:gsub("__XS_KMAP__", kmapLit)
-  header = header:gsub("__XS_SM1__", tostring(bundle.sm1))
-  header = header:gsub("__XS_SM2__", tostring(bundle.sm2))
-  header = header:gsub("__XS_VSUM__", tostring(bundle.vsum))
-  header = header:gsub("__XS_TAGN__", tostring(bundle.tagN))
-  header = header:gsub("__XS_TAGS__", tostring(bundle.tagS))
-  header = header:gsub("__XS_TAGF__", tostring(bundle.tagF))
-  header = header:gsub("__XS_TAGZ__", tostring(bundle.tagZ))
-  header = header:gsub("__XS_TAGNAN__", tostring(bundle.tagNaN))
-  header = header:gsub("__XS_TAGI__", tostring(bundle.tagI))
+  header = header:gsub("__XS_SM1__", numOr(bundle.sm1))
+  header = header:gsub("__XS_SM2__", numOr(bundle.sm2))
+  header = header:gsub("__XS_VSUM__", numOr(bundle.vsum))
+  header = header:gsub("__XS_TAGN__", numOr(bundle.tagN))
+  header = header:gsub("__XS_TAGS__", numOr(bundle.tagS))
+  header = header:gsub("__XS_TAGF__", numOr(bundle.tagF))
+  header = header:gsub("__XS_TAGZ__", numOr(bundle.tagZ))
+  header = header:gsub("__XS_TAGNAN__", numOr(bundle.tagNaN))
+  header = header:gsub("__XS_TAGI__", numOr(bundle.tagI))
   for nm, idx in pairs(bundle.antiIdx) do
     header = header:gsub("__XS_NM_" .. nm:upper() .. "__", numExpr(idx))
   end
-  header = header:gsub("__XS_SB__", tostring(CIPHER.basis))
-  header = header:gsub("__XS_LM__", tostring(CIPHER.mult))
-  header = header:gsub("__XS_LA__", tostring(CIPHER.add))
-  header = header:gsub("__XS_RM__", tostring(CIPHER.rcMult))
-  header = header:gsub("__XS_FMOD__", tostring(bundle.mod))
-  header = header:gsub("__XS_FM1__", tostring(bundle.saltM1))
-  header = header:gsub("__XS_FM2__", tostring(bundle.saltM2))
-  header = header:gsub("__XS_FM3__", tostring(bundle.saltM3))
-  header = header:gsub("__XS_STA__", tostring(bundle.stepA))
-  header = header:gsub("__XS_STB__", tostring(bundle.stepB))
-  header = header:gsub("__XS_STC__", tostring(bundle.stepC))
+  header = header:gsub("__XS_SB__", numOr(CIPHER.basis))
+  header = header:gsub("__XS_LM__", numOr(CIPHER.mult))
+  header = header:gsub("__XS_LA__", numOr(CIPHER.add))
+  header = header:gsub("__XS_RM__", numOr(CIPHER.rcMult))
+  header = header:gsub("__XS_FMOD__", function() return numExpr(bundle.mod) end)
+  header = header:gsub("__XS_FM1__", function() return numExpr(bundle.saltM1) end)
+  header = header:gsub("__XS_FM2__", function() return numExpr(bundle.saltM2) end)
+  header = header:gsub("__XS_FM3__", function() return numExpr(bundle.saltM3) end)
+  header = header:gsub("__XS_FSA__", function() return numExpr(bundle.stepA) end)
+  local CONST_TOKENS = { __XS_KA__ = 131, __XS_KB__ = 17, __XS_KC__ = 29, __XS_KD__ = 3, __XS_KE__ = 2147483647,
+    __XS_MH__ = 2147483647, __XS_LCG__ = 16807, __XS_H31__ = 31 }
+  for tok, val in pairs(CONST_TOKENS) do
+    header = header:gsub(tok, function() return numExpr(val) end)
+  end
+  header = header:gsub("__XS_STA__", numOr(bundle.stepA))
+  header = header:gsub("__XS_STB__", numOr(bundle.stepB))
+  header = header:gsub("__XS_STC__", numOr(bundle.stepC))
   do
     -- alias -> canonical opcode, and the canonical opcodes that reset the state
     local canonParts, resetParts = {}, {}
@@ -287,15 +319,22 @@ local function obfuscateOnce(source, chunkname, opts)
     header = header:gsub("__XS_CANONH__", "{" .. table.concat(canonParts, ",") .. "}")
     header = header:gsub("__XS_RESETH__", "{" .. table.concat(resetParts, ",") .. "}")
   end
-  header = header:gsub("__XS_MASKA__", tostring(bundle.maskA))
+  header = header:gsub("__XS_MASKA__", numOr(bundle.maskA))
   header = header:gsub("__XS_CIPHERS__", (ciphersLit:gsub("%%", "%%%%")))
   header = header:gsub("__XS_CLENS__", cipherLensLit)
   local escLit = table.concat(bundle.escEntries, ",")
   header = header:gsub("__XS_ESC__", function() return escLit end)
   header = header:gsub("__XS_PROTOS__", (protosLit:gsub("%%", "%%%%")))
-  header = header:gsub("__XS_CHECKSUM__", tostring(bundle.checksum))
-  header = header:gsub("__XS_ANTITAMPER_ON__", opts.antiTamper and "true" or "false")
-  header = header:gsub("__XS_ANTIDEBUG__", opts.antiDebug and "true" or "false")
+  header = header:gsub("__XS_CHECKSUM__", numOr(bundle.checksum))
+  -- Anti-debug boot tokens by check index (empty when anti-debug is off).
+  local adTokParts = {}
+  for ci = 1, 14 do
+    if bundle.adTokens[ci] then adTokParts[#adTokParts + 1] = "[" .. numExpr(ci) .. "]=" .. numOr(bundle.adTokens[ci]) end
+  end
+  local adTokLit = "({" .. table.concat(adTokParts, ",") .. "})"
+  header = header:gsub("__XS_ADTOKS__", function() return adTokLit end)
+  header = header:gsub("__XS_ANTITAMPER_ON__", function() return opaqueBool(opts.antiTamper and true or false) end)
+  header = header:gsub("__XS_ANTIDEBUG__", function() return opaqueBool(opts.antiDebug and true or false) end)
   header = header:gsub("__XS_WMIDX__", numExpr(bundle.watermarkIdx))
   header = header:gsub("__XS_DECMAIN__", numExpr(bundle.decMain))
   header = header:gsub("__XS_GROOT__", function() return resolveShared("stdG") end)
@@ -311,8 +350,8 @@ local function obfuscateOnce(source, chunkname, opts)
     local function add(name)
       if seen[name] then return end
       seen[name] = true
-      parts[#parts + 1] = string.format("[%s] = function() return %s end",
-        encName(stdNames, name), name)
+      parts[#parts + 1] = string.format("[%s] = function() return %s[%s] end",
+        encName(stdNames, name), resolveShared("base"), escStr(name))
     end
     for _, name in ipairs(ENV_CHECK_NAMES) do add(name) end
     for _, name in ipairs(bundle.liveNames) do add(name) end
@@ -321,14 +360,16 @@ local function obfuscateOnce(source, chunkname, opts)
   header = header:gsub("__XS_ENVCHECK__", function()
     if not opts.antiDebug then return "" end
     local corrupt = resolveShared("corrupt")
-    local parts = {}
+    -- Each getter reads its global bare, inside its own closure, so a logger
+    -- installed before the protected code is still caught (see the env-logger
+    -- test). The names therefore stay readable, but only in these closures:
+    -- the check itself is one loop with a single type() call.
+    local getters = {}
     for _, name in ipairs(ENV_CHECK_NAMES) do
-      -- A bare read on purpose: it sees the live global, so a logger installed
-      -- before the protected code is caught (see the env-logger test). These
-      -- names therefore stay readable in the output.
-      parts[#parts + 1] = string.format('if type(%s) ~= "function" then %s() end', name, corrupt)
+      getters[#getters + 1] = "function() return " .. resolveShared("base") .. "[" .. escStr(name) .. "] end"
     end
-    return table.concat(parts, " ")
+    return string.format('local __ty = %s[__XS_KS_type__] local __envg = {%s} for __i = 1, #__envg do if __ty(__envg[__i]()) ~= "function" then %s() end end',
+      resolveShared("base"), table.concat(getters, ", "), corrupt)
   end)
 
   local footer = substitute(footerTpl, function(tok)
@@ -343,6 +384,9 @@ local function obfuscateOnce(source, chunkname, opts)
   header = header:gsub("__XS_STD__", function()
     return buildStdBlock(stdTab, stdList, stdNames)
   end)
+  -- Builtin and library names used by the anti-debug and writable-probe code,
+  -- written as escaped keys (__XS_KS_<name>__ -> "\ddd...").
+  header = header:gsub("__XS_KS_(%w+)__", function(name) return escStr(name) end)
   footer = footer:gsub("__XS_MAIN__", numExpr(bundle.mainProto))
 
   -- Wrap the ENTIRE output (header locals: key/decode/consts/protos,

@@ -4,8 +4,11 @@
 -- recursive-descent parser (Lua 5.1-5.4 and Luau syntax) finds where every
 -- statement starts and ends, and the emitter writes the tokens back with the
 -- spacing Lua needs and a `;` between consecutive statements. Comments are
--- dropped except the --[[Protected ...]] watermark. Integer literals of 1000
--- or more are masked as arithmetic ((n+k)-k) with a per-call key.
+-- dropped except the --[[Protected ...]] watermark. When masking is on (engine
+-- templates), every integer literal is written in a random form that never
+-- shows its value: (n), ((V)-k) with V = n+k, or a parenthesised ((V)-k). Some
+-- statement boundaries get a junk statement (`do end`, or an `if` whose
+-- condition is always false), so the code is harder to follow.
 --
 -- Placeholders (%name%, __XS_*__) are opaque words. They may expand to nothing
 -- or to whole statements, so no `;` is ever written next to one.
@@ -15,7 +18,6 @@
 -- that the parser cannot read is visible in the tests rather than silent.
 --------------------------------------------------------------------
 
-local MASK_MIN = 1000
 -- Luau compound assignment operators (two and three characters).
 local COMPOUND = { ["+="] = true, ["-="] = true, ["*="] = true, ["/="] = true, ["%="] = true,
   ["^="] = true, ["//="] = true, ["..="] = true }
@@ -415,6 +417,30 @@ end
 -- Emitter
 --------------------------------------------------------------------
 
+-- An integer written as arithmetic: V = n+k is written, then k, so the value n
+-- never appears. Used for every integer literal in masked output.
+local function maskInt(n)
+  local k = math.random(1000, 99999)
+  return string.format("((%d)-%d)", n + k, k)
+end
+
+-- A random form for one integer literal (see the header comment).
+local function wrapInt(v)
+  local n = tonumber(v)
+  local form = math.random(1, 3)
+  if form == 1 then return "(" .. v .. ")" end
+  if form == 2 then return maskInt(n) end
+  return "(" .. maskInt(n) .. ")"
+end
+
+-- A statement that never does anything: either an empty block, or an `if`
+-- whose condition is always false. n*(n+1) is even for every integer n.
+local function junkStatement()
+  if math.random(1, 2) == 1 then return "do end" end
+  local n = math.random(2, 99999)
+  return string.format("if (%s*(%s+1))%%2==1 then end", maskInt(n), maskInt(n))
+end
+
 -- True when two adjacent token texts would otherwise merge or change meaning.
 local function needsSpace(a, b)
   local x, y = a:sub(-1), b:sub(1, 1)
@@ -438,9 +464,8 @@ local function emit(code, tail, sep, drop, maskKey)
       for _, c in ipairs(tk.pre or {}) do carry[#carry + 1] = c end
     else
       local v = tk.v
-      if tk.t == "num" and maskKey and v:match("^%d+$") and tonumber(v) >= MASK_MIN then
-        local k = math.random(1000, 99999)
-        v = string.format("((%d+%d)-%d)", tonumber(v), k, k)
+      if tk.t == "num" and maskKey and v:match("^%d+$") then
+        v = wrapInt(v)
       end
       -- The separator goes before the comments, so a comment never sits between
       -- a statement and the `;` that ends it.
@@ -448,6 +473,9 @@ local function emit(code, tail, sep, drop, maskKey)
       if needSep then
         out[#out + 1] = ";"
         prev = ";"
+        if maskKey and math.random() < 0.3 then
+          out[#out + 1] = junkStatement() .. ";"
+        end
       end
       local comments = {}
       for _, c in ipairs(carry) do comments[#comments + 1] = c end

@@ -12,6 +12,10 @@ local genOpaquePredicate = _predicates.genOpaquePredicate
 local _util = load("util")
 local randomIdent, substitute, shuffledRange = _util.randomIdent, _util.substitute, _util.shuffledRange
 local numExpr = _util.numExpr
+local function numOr(v)
+  if math.type(v) == "integer" then return numExpr(v) end
+  return tostring(v)
+end
 
 -- Handler self-test. Runs each simple handler against a synthetic frame with
 -- known inputs and checks the frame it leaves behind. Numbers are written as
@@ -45,7 +49,7 @@ local function renderSelfTest(ensureName, OPNUM, BINNUM, UNNUM, KV)
   local function group(callStr, cond)
     groups[#groups + 1] = { "    r, ip = " .. callStr, "    if not (" .. cond .. ") then return false end" }
   end
-  group(call(OPNUM.LOADK, "1", tostring(KV.wm), "0"), 'r[1] == "Protected by XenonSec" and ip == 2')
+  group(call(OPNUM.LOADK, "1", numOr(KV.wm), "0"), 'r[1] == "Protected by XenonSec" and ip == 2')
   group(call(OPNUM.LOADTRUE, "1", "0", "0"), "r[1] == true and ip == 2")
   group(call(OPNUM.LOADFALSE, "1", "0", "0"), "r[1] == false and ip == 2")
   group(call(OPNUM.LOADNIL, "1", "2", "0", "{[1]=5,[2]=6}"), "r[1] == nil and r[2] == nil and ip == 2")
@@ -61,7 +65,7 @@ local function renderSelfTest(ensureName, OPNUM, BINNUM, UNNUM, KV)
     local num = BINNUM[sym]
     group(call(OPNUM["BIN" .. k], "1", "2", "3", "{[2]=7,[3]=3}"),
       string.format("r[1] == %s[%s](7, 3) and ip == 2", BINOPS, enc(num)))
-    group(call(OPNUM["BINK" .. k], "1", "2", tostring(KV.three), "{[2]=7}"),
+    group(call(OPNUM["BINK" .. k], "1", "2", numOr(KV.three), "{[2]=7}"),
       string.format("r[1] == %s[%s](7, 3) and ip == 2", BINOPS, enc(num)))
   end
   for k, sym in ipairs(UNOP_SYMBOLS) do
@@ -134,8 +138,9 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
     for _, name in ipairs({ "JMP", "JF", "JT", "JNIL", "RET", "RETM" }) do
       if OPNUM[name] then resetList[#resetList + 1] = string.format("[%s] = true", numExpr(OPNUM[name])) end
     end
-    local M, M1, M2, M3 = tostring(KV.MOD), tostring(KV.M1), tostring(KV.M2), tostring(KV.M3)
-    local SA, SB, SC = tostring(KV.SA), tostring(KV.SB), tostring(KV.SC)
+    local M, M1, M2, M3 = numExpr(KV.MOD), numExpr(KV.M1), numExpr(KV.M2), numExpr(KV.M3)
+    local SA, SB, SC = numExpr(KV.SA), numExpr(KV.SB), numExpr(KV.SC)
+    local LCG_MUL, LCG_MOD = numExpr(16807), numExpr(2147483647)
     local dec, pr = ensureName("dec"), ensureName("protos")
     local seed = KV.rekeySeed or 1
     local rekeyFn = table.concat({
@@ -146,11 +151,11 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       "  local code = pp.c",
       "  if not code then return end",
       "  local dh = 5381",
-      "  local function hm(n) dh = (dh * 31 + (n or 0)) % 2147483647 end",
+      "  local function hm(n) dh = (dh * " .. numExpr(31) .. " + (n or 0)) % " .. numExpr(2147483647) .. " end",
       "  local RST = { " .. table.concat(resetList, ", ") .. " }",
       "  -- oc is the decode state of the current instruction. It depends only on",
       "  -- canonical opcodes, so the rewrite leaves it unchanged.",
-      "  local oc = 0",
+      "  local oc = " .. ensureName("chainInit") .. "()",
       "  for ci = 1, #code do",
       "    local t = code[ci]",
       "    local sd = t[5]",
@@ -158,9 +163,9 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       "    local a2, a3, a4 = " .. dec .. "(t[2], sd, 2, oc), " .. dec .. "(t[3], sd, 3, oc), " .. dec .. "(t[4], sd, 4, oc)",
       "    local canon = " .. CANON .. "[key] or key",
       "    local grp = " .. RK .. ".g[key] or { key }",
-      "    " .. RK .. ".s = (" .. RK .. ".s * 16807) % 2147483647",
+      "    " .. RK .. ".s = (" .. RK .. ".s * " .. LCG_MUL .. ") % " .. LCG_MOD,
       "    local nk = grp[(" .. RK .. ".s % #grp) + 1]",
-      "    " .. RK .. ".s = (" .. RK .. ".s * 16807) % 2147483647",
+      "    " .. RK .. ".s = (" .. RK .. ".s * " .. LCG_MUL .. ") % " .. LCG_MOD,
       "    local ns = " .. RK .. ".s % " .. M,
       "    t[5] = ns",
       "    t[1] = (nk + (ns * " .. M1 .. " + oc * " .. M3 .. " + " .. M2 .. ") % " .. M .. ") % " .. M,
@@ -168,7 +173,7 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       "    t[3] = (a3 + (ns * " .. M1 .. " + oc * " .. M3 .. " + 3 * " .. M2 .. ") % " .. M .. ") % " .. M,
       "    t[4] = (a4 + (ns * " .. M1 .. " + oc * " .. M3 .. " + 4 * " .. M2 .. ") % " .. M .. ") % " .. M,
       "    hm(ns); hm(t[1]); hm(t[2]); hm(t[3]); hm(t[4])",
-      "    if RST[canon] then oc = 0 else oc = (oc * " .. SA .. " + canon * " .. SB .. " + " .. SC .. ") % " .. M .. " end",
+      "    if RST[canon] then oc = " .. ensureName("chainInit") .. "() else oc = (oc * " .. SA .. " + canon * " .. SB .. " + " .. SC .. ") % " .. M .. " end",
       "  end",
       "  pp.i = dh",
       "end",
@@ -277,19 +282,19 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
     if tok:sub(1, 2) == "N_" then
       local opname = tok:sub(3)
       assert(OPNUM[opname], "unknown opcode placeholder " .. tok)
-      return tostring(OPNUM[opname])
+      return numOr(OPNUM[opname])
     end
     if tok:sub(1, 3) == "BN_" then
       local tokenName = tok:sub(4)
       for sym, name in pairs(BINOP_TOKEN_NAMES) do
-        if name == tokenName then return tostring(BINNUM[sym]) end
+        if name == tokenName then return numOr(BINNUM[sym]) end
       end
       error("unknown binop placeholder " .. tok)
     end
     if tok:sub(1, 3) == "UN_" then
       local tokenName = tok:sub(4)
       for sym, name in pairs(UNOP_TOKEN_NAMES) do
-        if name == tokenName then return tostring(UNNUM[sym]) end
+        if name == tokenName then return numOr(UNNUM[sym]) end
       end
       error("unknown unop placeholder " .. tok)
     end
@@ -310,7 +315,7 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       return genOpaquePredicate(probe, depthBase + math.random(0, 2))
     end
     if tok:sub(1, 2) == "K_" then
-      return tostring(KV[tok:sub(3)])
+      return numOr(KV[tok:sub(3)])
     end
     if tok == "NEWREGS" then
       if KV and KV.proxify then
@@ -335,7 +340,7 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       --   VMETA: captured local `name` lives at store[name].
       local RM, VM = ensureName("RMETA"), ensureName("VMETA")
       local pt, pk, pv, pb = ensureName("pxt"), ensureName("pxk"), ensureName("pxv"), ensureName("pxb")
-      local A, B, M = tostring(KV.PA), tostring(KV.PB), tostring(KV.PM)
+      local A, B, M = numOr(KV.PA), numOr(KV.PB), numOr(KV.PM)
       return table.concat({
         "local " .. RM .. " = {}",
         RM .. ".__index = function(" .. pt .. ", " .. pk .. ") local " .. pb .. " = " .. pt .. "[0][(" .. pk .. " * " .. pt .. "[-1] + " .. pt .. "[-2]) % " .. M .. "]; if " .. pb .. " then return " .. pb .. "[1] end return nil end",
@@ -363,7 +368,7 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       -- one is decoded again on its next use.
       local flush = ""
       if KV and KV.flush then
-        flush = " if " .. probeExpr() .. " % " .. tostring(KV.flushEvery or 65536) .. " == 0 then for " ..
+        flush = " if " .. probeExpr() .. " % " .. numOr(KV.flushEvery or 65536) .. " == 0 then for " ..
                 ensureName("fk") .. " in pairs(" .. ensureName("consts") .. ") do rawset(" ..
                 ensureName("consts") .. ", " .. ensureName("fk") .. ", nil) end " ..
                 "for " .. ensureName("fk") .. " in pairs(" .. ensureName("scache") .. ") do rawset(" ..

@@ -82,7 +82,8 @@ end
 -- never appears in the generated code (table keys, indexes, opcode numbers).
 local function numExpr(n)
   local k = math.random(1000, 99999)
-  return string.format("((%d+%d)-%d)", n, k, k)
+  -- Write n+k and k, never n itself: the literal n does not appear anywhere.
+  return string.format("((%d)-%d)", n + k, k)
 end
 
 return {

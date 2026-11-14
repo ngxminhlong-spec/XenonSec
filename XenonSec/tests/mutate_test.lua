@@ -39,13 +39,16 @@ print(table.concat(t, ","), math.floor(3.7), select("#", 1, 2))
     check("output has no readable " .. name, not out:find(name, 1, true))
   end
   -- The bootstrap finds string.char / string.byte / table.concat by behaviour,
-  -- so none of those names appear. getmetatable is the one visible root, used
-  -- once to reach the string library.
-  for _, name in ipairs({ "string.byte", "string.char", "table.concat" }) do
-    check("bootstrap has no readable " .. name, not out:find(name, 1, true))
+  -- so none of those names appear. The builtins it needs (getmetatable, pcall,
+  -- pairs, type) and the anti-debug library names are read from the root table
+  -- with escaped keys, so none of them appear as plain text either.
+  for _, name in ipairs({ "string.byte", "string.char", "table.concat", "string.dump", "debug.getinfo", "debug.gethook" }) do
+    check("no readable " .. name, not out:find(name, 1, true))
   end
-  local _, gm = out:gsub("getmetatable", "")
-  check("getmetatable appears only once (the bootstrap root)", gm == 1, "count " .. gm)
+  for _, name in ipairs({ "getmetatable", "pcall", "pairs" }) do
+    local _, c = out:gsub("%f[%w_]" .. name .. "%f[^%w_]", "")
+    check("no plain " .. name .. " in the output", c == 0, "count " .. c)
+  end
 end
 
 -- 2. Correct output over several flush cycles, flush on and off.
@@ -108,7 +111,7 @@ end
 do
   local out = Obf.obfuscate('print("x")', "t", { minSize = false, strength = 2 })
   local count, maxKey = 0, 0
-  -- Minified builds write a masked key as ((n+k)-k); read both forms so the
+  -- Minified builds write a masked key as ((V)-k); read both forms so the
   -- base-opcode keys (masked to arithmetic) are still counted.
   local function take(v)
     v = tonumber(v)
@@ -120,6 +123,9 @@ do
   for k in out:gmatch("%[(%d+)%]%s*=%s*{[%d,%s]*}") do take(k) end
   for k in out:gmatch("%[%(%((%d+)%+%d+%)%-%d+%)%]%s*=%s*function%(") do take(k) end
   for k in out:gmatch("%[%(%((%d+)%+%d+%)%-%d+%)%]%s*=%s*{[%d,%s]*}") do take(k) end
+  -- Current form: ((V)-k) with V = n+k, so the key is V - k.
+  for v, kk in out:gmatch("%[%(%((%d+)%)%-(%d+)%)%]%s*=%s*function%(") do take(tonumber(v) - tonumber(kk)) end
+  for v, kk in out:gmatch("%[%(%((%d+)%)%-(%d+)%)%]%s*=%s*{[%d,%s]*}") do take(tonumber(v) - tonumber(kk)) end
   check("literal handler keys stay inside the dense pool bound",
     count > 0 and maxKey <= count + 28 + 56, ("literal keys=%d largest=%d"):format(count, maxKey))
 end
