@@ -153,8 +153,6 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       "  local dh = 5381",
       "  local function hm(n) dh = (dh * " .. numExpr(31) .. " + (n or 0)) % " .. numExpr(2147483647) .. " end",
       "  local RST = { " .. table.concat(resetList, ", ") .. " }",
-      "  -- oc is the decode state of the current instruction. It depends only on",
-      "  -- canonical opcodes, so the rewrite leaves it unchanged.",
       "  local oc = " .. ensureName("chainInit") .. "()",
       "  for ci = 1, #code do",
       "    local t = code[ci]",
