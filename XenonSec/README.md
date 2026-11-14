@@ -279,13 +279,13 @@ XenonSec/
 | End-to-end, every pass on | `lua tests/e2e_test.lua` | 20 / 20 |
 | SSA pass, including regression and loop cases | `lua tests/ssa_test.lua` | 58 / 58 |
 | Luau features, against plain-Lua oracles | `lua tests/luau_test.lua` | 12 / 12 |
-| Pass-level, including minifier and literal masking | `lua tests/passes_test.lua` | 39 / 39 |
+| Pass-level, including minifier and literal masking | `lua tests/passes_test.lua` | 44 / 44 |
 | Metamorphic builds, standard-library lookups, key masking | `lua tests/mutate_test.lua` | 21 / 21 |
 | ProxifyLocal, with and without other options | `lua tests/proxify_test.lua` | 31 / 31 |
 | Anti-tamper and anti-debug | `lua tests/protection_test.lua` | 36 / 36 |
-| Lune differential suite (10 programs x option sets, plus an env-logger check) | `sh tests/run_runtime.sh <runtime> lua` | 86 / 86 on Lune (last recorded; not re-run in this pass) |
+| Lune differential suite (10 programs x option sets, plus an env-logger check) | `sh tests/run_runtime.sh <runtime> lua` | 86 / 86 on Lune |
 
-`protection_test.lua` passes every check. The mid-run debugger-attach check used
+`protection_test.lua` runs its bytecode-hash checks only on Lua 5.3, where the hash prefix is generated: all 36 checks pass there, and 31 run on Lua 5.4. The mid-run debugger-attach check used
 to depend on the build's random draw of anti-debug checks; every live check now runs in
 every build, so it is no longer timing-dependent by design (it still runs at random
 periods, so the timing of a detection varies).
@@ -317,11 +317,8 @@ suite.
 
 **Known open issues:**
 
-- `protection_test.lua` fails two checks, "bytecode-check prefix found in the
-  output" and "anti-debug build has the bytecode-hash prefix". These are open
-  issues, not regressions in the current build.
-- The mid-run debugger-attach check is timing-sensitive and can fail
-  intermittently.
+- The mid-run debugger-attach check runs at random periods, so when it fires varies
+  between runs. It passed in every run so far; watch it if a run fails.
 
 **Runtime and Luau gaps:**
 

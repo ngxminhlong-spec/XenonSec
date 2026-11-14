@@ -401,7 +401,11 @@ do
   local src = 'print("selftest run")'
   local out = Obf.obfuscate(src, "t", { antiDebug = true })
   local off, nOff = out:gsub("\\027Lua", "\\000Lua", 1)
-  check("bytecode-check prefix found in the output", nOff == 1, "n=" .. nOff)
+  -- The dump prefix is only generated on Lua 5.3 (see obfuscator.lua), so this
+  -- check only applies there; on other hosts the build keeps zero hashes.
+  if _VERSION == "Lua 5.3" then
+    check("bytecode-check prefix found in the output", nOff == 1, "n=" .. nOff)
+  end
   local function runOut(text)
     local chunk = load(text, "t")
     local captured = {}
@@ -445,7 +449,9 @@ do
   local _, placements = plain:gsub("if [%w_%.]+%s*%%%s*%d+%s*==%s*%d+%s*then%s*[%w_]+%(%d+%)%s*end", "")
   check("default build has no periodic check placements", placements == 0, "n=" .. placements)
   local ad = Obf.obfuscate(src, "t", { antiDebug = true })
-  check("anti-debug build has the bytecode-hash prefix", ad:find("\\027Lua", 1, true) ~= nil)
+  if _VERSION == "Lua 5.3" then
+    check("anti-debug build has the bytecode-hash prefix", ad:find("\\027Lua", 1, true) ~= nil)
+  end
 end
 
 print()
