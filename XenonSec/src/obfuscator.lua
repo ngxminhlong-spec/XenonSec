@@ -35,6 +35,12 @@ local buildStdBlock, encName, rewriteStd = _stdlib.buildStdBlock, _stdlib.encNam
 local minifyTemplateText, randomIdent, substitute = _util.minifyTemplateText, _util.randomIdent, _util.substitute
 local numExpr = _util.numExpr
 
+-- A name as a Lua string literal of decimal byte escapes: the name never
+-- appears as plain text in the output.
+local function escStr(name)
+  return '"' .. name:gsub(".", function(c) return string.format("\\%03d", c:byte()) end) .. '"'
+end
+
 -- Integer constants go through numExpr so their literal value never appears.
 local function numOr(v)
   if math.type(v) == "integer" then return numExpr(v) end
@@ -344,8 +350,8 @@ local function obfuscateOnce(source, chunkname, opts)
     local function add(name)
       if seen[name] then return end
       seen[name] = true
-      parts[#parts + 1] = string.format("[%s] = function() return %s end",
-        encName(stdNames, name), name)
+      parts[#parts + 1] = string.format("[%s] = function() return %s[%s] end",
+        encName(stdNames, name), resolveShared("base"), escStr(name))
     end
     for _, name in ipairs(ENV_CHECK_NAMES) do add(name) end
     for _, name in ipairs(bundle.liveNames) do add(name) end
@@ -360,10 +366,10 @@ local function obfuscateOnce(source, chunkname, opts)
     -- the check itself is one loop with a single type() call.
     local getters = {}
     for _, name in ipairs(ENV_CHECK_NAMES) do
-      getters[#getters + 1] = "function() return " .. name .. " end"
+      getters[#getters + 1] = "function() return " .. resolveShared("base") .. "[" .. escStr(name) .. "] end"
     end
-    return string.format('local __envg = {%s} for __i = 1, #__envg do if type(__envg[__i]()) ~= "function" then %s() end end',
-      table.concat(getters, ", "), corrupt)
+    return string.format('local __ty = %s[__XS_KS_type__] local __envg = {%s} for __i = 1, #__envg do if __ty(__envg[__i]()) ~= "function" then %s() end end',
+      resolveShared("base"), table.concat(getters, ", "), corrupt)
   end)
 
   local footer = substitute(footerTpl, function(tok)
@@ -378,6 +384,9 @@ local function obfuscateOnce(source, chunkname, opts)
   header = header:gsub("__XS_STD__", function()
     return buildStdBlock(stdTab, stdList, stdNames)
   end)
+  -- Builtin and library names used by the anti-debug and writable-probe code,
+  -- written as escaped keys (__XS_KS_<name>__ -> "\ddd...").
+  header = header:gsub("__XS_KS_(%w+)__", function(name) return escStr(name) end)
   footer = footer:gsub("__XS_MAIN__", numExpr(bundle.mainProto))
 
   -- Wrap the ENTIRE output (header locals: key/decode/consts/protos,

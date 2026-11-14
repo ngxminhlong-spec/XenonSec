@@ -8,7 +8,7 @@
 return [===[
 -- Captured at load, before any program code runs. The checks compare against
 -- these values, not against whatever the globals hold later.
-local %pcallC% = pcall
+local %pcallC% = %base%[__XS_KS_pcall__]
 -- Builtins the hash check uses, captured here so a program that rebinds a
 -- global (type, string, ...) cannot make the check throw. %byte% above is the
 -- captured string.byte.
@@ -21,12 +21,12 @@ local %coRunFn% = nil
 -- and no decoding.
 local %NM% = {}
 if __XS_ANTIDEBUG__ then
-  %NM%.debug = %dname%(__XS_NM_DEBUG__)
+  %NM%[__XS_KS_debug__] = %dname%(__XS_NM_DEBUG__)
   %NM%.gethook = %dname%(__XS_NM_GETHOOK__)
   %NM%.getinfo = %dname%(__XS_NM_GETINFO__)
   %NM%.coroutine = %dname%(__XS_NM_COROUTINE__)
   %NM%.running = %dname%(__XS_NM_RUNNING__)
-  local %dok%, %dlib% = %pcallC%(function() return %base%[%NM%.debug] end)
+  local %dok%, %dlib% = %pcallC%(function() return %base%[%NM%[__XS_KS_debug__]] end)
   if %dok% and %dlib% then
     local %gok%, %gfn% = %pcallC%(function() return %dlib%[%NM%.gethook] end)
     local %iok%, %ifn% = %pcallC%(function() return %dlib%[%NM%.getinfo] end)
@@ -87,7 +87,7 @@ local %realEnv% = function()
   local %e% = %RE%
   %e%.hook = %hookFn%; %e%.coRun = %coRunFn%; %e%.info = %infoFn%; %e%.dbg = %dbgLib%
   if %dbgLib% then
-    %e%.liveDbg = %base%[%NM%.debug]
+    %e%.liveDbg = %base%[%NM%[__XS_KS_debug__]]
     %e%.liveHook = %dbgLib%[%NM%.gethook]
     %e%.liveInfo = %dbgLib%[%NM%.getinfo]
   else
@@ -135,7 +135,7 @@ end
 -- platform does not start with %DPFX%, so the test is skipped there.
 local %CKH% = { __XS_CKH__ }
 local %DPFX% = __XS_DPFX__
-local %sdump% = string and string.dump
+local %sdump% = %base%[__XS_KS_string__] and %base%[__XS_KS_string__][__XS_KS_dump__]
 local function %ckDump%(%f%)
   if not %sdump% then return nil end
   local %ok%, %s% = %pcallC%(%sdump%, %f%, true)

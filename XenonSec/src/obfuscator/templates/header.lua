@@ -398,7 +398,7 @@ local %LIVE% = { __XS_LIVE__ }
 local %priv% = {}
 local %NILH% = {}
 local %probeKey% = tostring(%priv%)
-local %writable% = pcall(function()
+local %writable% = %base%[__XS_KS_pcall__](function()
   %base%[%probeKey%] = true
   %base%[%probeKey%] = nil
 end)

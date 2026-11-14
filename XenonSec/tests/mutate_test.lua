@@ -39,13 +39,16 @@ print(table.concat(t, ","), math.floor(3.7), select("#", 1, 2))
     check("output has no readable " .. name, not out:find(name, 1, true))
   end
   -- The bootstrap finds string.char / string.byte / table.concat by behaviour,
-  -- so none of those names appear. getmetatable is the one visible root, used
-  -- once to reach the string library.
-  for _, name in ipairs({ "string.byte", "string.char", "table.concat" }) do
-    check("bootstrap has no readable " .. name, not out:find(name, 1, true))
+  -- so none of those names appear. The builtins it needs (getmetatable, pcall,
+  -- pairs, type) and the anti-debug library names are read from the root table
+  -- with escaped keys, so none of them appear as plain text either.
+  for _, name in ipairs({ "string.byte", "string.char", "table.concat", "string.dump", "debug.getinfo", "debug.gethook" }) do
+    check("no readable " .. name, not out:find(name, 1, true))
   end
-  local _, gm = out:gsub("getmetatable", "")
-  check("getmetatable appears only once (the bootstrap root)", gm == 1, "count " .. gm)
+  for _, name in ipairs({ "getmetatable", "pcall", "pairs" }) do
+    local _, c = out:gsub("%f[%w_]" .. name .. "%f[^%w_]", "")
+    check("no plain " .. name .. " in the output", c == 0, "count " .. c)
+  end
 end
 
 -- 2. Correct output over several flush cycles, flush on and off.
