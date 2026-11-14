@@ -108,7 +108,7 @@ end
 do
   local out = Obf.obfuscate('print("x")', "t", { minSize = false, strength = 2 })
   local count, maxKey = 0, 0
-  -- Minified builds write a masked key as ((n+k)-k); read both forms so the
+  -- Minified builds write a masked key as ((V)-k); read both forms so the
   -- base-opcode keys (masked to arithmetic) are still counted.
   local function take(v)
     v = tonumber(v)
@@ -120,6 +120,9 @@ do
   for k in out:gmatch("%[(%d+)%]%s*=%s*{[%d,%s]*}") do take(k) end
   for k in out:gmatch("%[%(%((%d+)%+%d+%)%-%d+%)%]%s*=%s*function%(") do take(k) end
   for k in out:gmatch("%[%(%((%d+)%+%d+%)%-%d+%)%]%s*=%s*{[%d,%s]*}") do take(k) end
+  -- Current form: ((V)-k) with V = n+k, so the key is V - k.
+  for v, kk in out:gmatch("%[%(%((%d+)%)%-(%d+)%)%]%s*=%s*function%(") do take(tonumber(v) - tonumber(kk)) end
+  for v, kk in out:gmatch("%[%(%((%d+)%)%-(%d+)%)%]%s*=%s*{[%d,%s]*}") do take(tonumber(v) - tonumber(kk)) end
   check("literal handler keys stay inside the dense pool bound",
     count > 0 and maxKey <= count + 28 + 56, ("literal keys=%d largest=%d"):format(count, maxKey))
 end

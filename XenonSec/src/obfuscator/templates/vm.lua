@@ -112,7 +112,7 @@ local function %run%(%mod%, ...)
   local function %vp%(%pi%)
     local %pp% = %protos%[%pi%]
     local %hh% = 5381
-    local function %mm%(%n%) %hh% = (%hh% * 31 + (%n% or 0)) % 2147483647 end
+    local function %mm%(%n%) %hh% = (%hh% * __XS_H31__ + (%n% or 0)) % __XS_MH__ end
     %mm%(%pp%.v and 1 or 0)
     %mm%(%pp%.w and 1 or 0)
     %mm%(%pp%.n)
@@ -121,7 +121,7 @@ local function %run%(%mod%, ...)
     -- Decoded code, if present, must still hash to the value stored at build
     -- time. This catches edits made to the live tuples after the first call.
     local %ch% = 5381
-    local function %cm%(%n%) %ch% = (%ch% * 31 + (%n% or 0)) % 2147483647 end
+    local function %cm%(%n%) %ch% = (%ch% * __XS_H31__ + (%n% or 0)) % __XS_MH__ end
     if %pp%.c then
       for %ck% = 1, #%pp%.c do
         local %cins% = %pp%.c[%ck%]

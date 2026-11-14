@@ -167,8 +167,11 @@ local function buildStdBlock(tabName, list, names)
     names.ok, names.r, names.j, names.pc, names.f, names.ok, names.r, names.j, names.byte, names.f)
   -- Name decoder: builds the string byte by byte, so it needs no table library.
   -- Same recurrence as keystream() above: the state advances once per byte.
-  lines[#lines + 1] = string.format(
-    "local function %s(%s, %s) local %s = \"\" for %s = 1, #%s do %s = (%s * 16807) %% 2147483647 %s = %s .. %s((%s[%s] - (%s - %s %% 65536) / 65536) %% 256) end return %s end",
+  local decTpl = "local function %s(%s, %s) local %s = \"\" for %s = 1, #%s do %s = (%s * 16807) %% 2147483647 %s = %s .. %s((%s[%s] - (%s - %s %% 65536) / 65536) %% 256) end return %s end"
+  -- The two Park-Miller constants are masked like every other integer constant.
+  decTpl = decTpl:gsub("16807", function() return numExpr(16807) end)
+  decTpl = decTpl:gsub("2147483647", function() return numExpr(2147483647) end)
+  lines[#lines + 1] = string.format(decTpl,
     names.dec, names.t, seedVar, names.o, names.j, names.t, seedVar, seedVar,
     names.o, names.o, names.char, names.t, names.j, seedVar, seedVar, names.o)
   -- table.concat, resolved through the same encoded lookup as everything else.

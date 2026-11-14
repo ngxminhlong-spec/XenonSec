@@ -52,7 +52,7 @@ local function %chainInit%() return %bootSt% end
 -- which marks the key bad (see %corrupt%).
 local function %vaultOk%()
   local %vs% = 0
-  for %vi% = 1, #%vault% do %vs% = (%vs% + %vault%[%vi%] * (%vi% % 7 + 1)) % 2147483647 end
+  for %vi% = 1, #%vault% do %vs% = (%vs% + %vault%[%vi%] * (%vi% % 7 + 1)) % __XS_MH__ end
   return %vs% == %vsum%
 end
 
@@ -96,10 +96,10 @@ end
 local function %fin%(%h%, %k%)
   local %fa%, %fb% = 1, 0
   for %fi% = 1, #%k% do
-    %fa% = (%fa% * 131 + %k%[%fi%] * 17 + %fi%) % 1048573
-    %fb% = (%fb% * 29 + %k%[%fi%] * (%fi% + 3)) % 2147483647
+    %fa% = (%fa% * __XS_KA__ + %k%[%fi%] * __XS_KB__ + %fi%) % __XS_FMOD__
+    %fb% = (%fb% * __XS_KC__ + %k%[%fi%] * (%fi% + __XS_KD__)) % __XS_KE__
   end
-  return (%h% * (%fa% + 1) + %fb%) % 2147483647
+  return (%h% * (%fa% + 1) + %fb%) % __XS_MH__
 end
 
 if not %vaultOk%() then %kbad% = true end
@@ -281,7 +281,7 @@ local function %dproto%(%pr%)
   if not %pr%.w then %raw% = %mkLzd%()[1](%rawz%, %pr%.r) end
   local %code% = {}
   local %dh% = 5381
-  local function %hm%(%n%) %dh% = (%dh% * 31 + (%n% or 0)) % 2147483647 end
+  local function %hm%(%n%) %dh% = (%dh% * __XS_H31__ + (%n% or 0)) % __XS_MH__ end
   local %canon% = __XS_CANONH__
   local %rst% = __XS_RESETH__
   local %sd% = %pr%.n
@@ -299,7 +299,7 @@ local function %dproto%(%pr%)
     local %a% = %fld%(%base%, 2)
     local %b% = %fld%(%base%, 3)
     local %c% = %fld%(%base%, 4)
-    %sd% = (%sd% * 16807) % 2147483647
+    %sd% = (%sd% * __XS_LCG__) % __XS_MH__
     local %seed% = %sd% % __XS_FMOD__
     local %ca% = %canon%[%opn%] or %opn%
     local %e1% = %ef%(%opn%, %seed%, 1, %cur%)
@@ -356,7 +356,7 @@ end
 
 local function %verify%()
   local %h% = 5381
-  local function %mix%(%n%) %h% = (%h% * 31 + (%n% or 0)) % 2147483647 end
+  local function %mix%(%n%) %h% = (%h% * __XS_H31__ + (%n% or 0)) % __XS_MH__ end
   for %vci% = 1, #%clens% do
     local %vs% = %escC%[%vci%] or %raw%[%vci%]
     for %vcj% = 1, #%vs% do %mix%(%byte%(%vs%, %vcj%)) end

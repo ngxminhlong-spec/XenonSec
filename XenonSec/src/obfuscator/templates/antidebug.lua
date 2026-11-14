@@ -144,7 +144,7 @@ local function %ckDump%(%f%)
     if %byte%(%s%, %j%) ~= %byte%(%DPFX%, %j%) then return nil end
   end
   local %h% = 5381
-  for %j% = 1, #%s% do %h% = (%h% * 31 + %byte%(%s%, %j%)) % 2147483647 end
+  for %j% = 1, #%s% do %h% = (%h% * __XS_H31__ + %byte%(%s%, %j%)) % __XS_MH__ end
   return %h%
 end
 
