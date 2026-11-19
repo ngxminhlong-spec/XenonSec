@@ -141,9 +141,34 @@ local function %run%(%mod%, ...)
 
 %DECOY_HANDLERS%
 
-%HANDLER_SELFTEST%
-
 %OPALIASES%
+
+  -- Handler dispatch: a binary search tree over the registered keys. Internal
+  -- nodes are {pivot, low, high}; leaves are {key, handler}. The flat table
+  -- is dropped once the tree is built, so no single table maps keys to handlers.
+  local %dispatch%
+  do
+    local %ks% = {}
+    for %kk% in pairs(%H%) do %ks%[#%ks%+1] = %kk% end
+    table.sort(%ks%)
+    local function %build%(%lo%, %hi%)
+      if %lo% == %hi% then return { %ks%[%lo%], %H%[%ks%[%lo%]] } end
+      local %mid% = math.floor((%lo% + %hi%) / 2)
+      return { %ks%[%mid% + 1], %build%(%lo%, %mid%), %build%(%mid% + 1, %hi%) }
+    end
+    local %root% = %build%(1, #%ks%)
+    %dispatch% = function(%key%)
+      local %n% = %root%
+      while %n%[3] do
+        if %key% < %n%[1] then %n% = %n%[2] else %n% = %n%[3] end
+      end
+      if %n%[1] ~= %key% then return nil end
+      return %n%[2]
+    end
+  end
+  %H% = nil
+
+%HANDLER_SELFTEST%
 
   %runProto% = function(%protoIdx%, %callArgs%, %parentScope%)
     local %proto% = %protos%[%protoIdx%]
@@ -180,7 +205,7 @@ local function %run%(%mod%, ...)
       local %sd% = %ins%[5]
       local %mk% = %sd% * %K_M1% + %F%.%st% * %K_M3%
       local %key% = (%ins%[1] - (%mk% + %K_M2%) % %K_MOD%) % %K_MOD%
-      local %h% = %H%[%key%]
+      local %h% = %dispatch%(%key%)
       if not %h% then error() end
       local %w2% = (%ins%[2] - (%mk% + 2 * %K_M2%) % %K_MOD%) % %K_MOD%
       local %w3% = (%ins%[3] - (%mk% + 3 * %K_M2%) % %K_MOD%) % %K_MOD%

@@ -35,7 +35,7 @@ local function renderSelfTest(ensureName, OPNUM, BINNUM, UNNUM, KV)
   out[#out + 1] = string.format("  local f = { %s = {}, %s = a2, %s = a3, %s = a4, %s = 1, %s = 7 }",
     regsF, x2, x3, x4, ipF, prF)
   out[#out + 1] = string.format("  for i, v in pairs(init) do f.%s[i] = v end", regsF)
-  out[#out + 1] = string.format("  %s[num](f, nil)", H)
+  out[#out + 1] = string.format("  %s(num)(f, nil)", ensureName("dispatch"))
   out[#out + 1] = string.format("  return f.%s, f.%s", regsF, ipF)
   out[#out + 1] = "end"
   out[#out + 1] = string.format("local function %s()", hc)
