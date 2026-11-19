@@ -71,6 +71,7 @@ local function %run%(%mod%, ...)
   local %cget% = %mod%[9]
   local %scache% = %mod%[10]
   local %adStep% = %mod%[4]
+  local %chainInit% = %mod%[11]
   local %GETG% = %mod%[5]
   local %SETG% = %mod%[6]
   local %brick% = function()
@@ -111,7 +112,7 @@ local function %run%(%mod%, ...)
   local function %vp%(%pi%)
     local %pp% = %protos%[%pi%]
     local %hh% = 5381
-    local function %mm%(%n%) %hh% = (%hh% * 31 + (%n% or 0)) % 2147483647 end
+    local function %mm%(%n%) %hh% = (%hh% * __XS_H31__ + (%n% or 0)) % __XS_MH__ end
     %mm%(%pp%.v and 1 or 0)
     %mm%(%pp%.w and 1 or 0)
     %mm%(%pp%.n)
@@ -120,7 +121,7 @@ local function %run%(%mod%, ...)
     -- Decoded code, if present, must still hash to the value stored at build
     -- time. This catches edits made to the live tuples after the first call.
     local %ch% = 5381
-    local function %cm%(%n%) %ch% = (%ch% * 31 + (%n% or 0)) % 2147483647 end
+    local function %cm%(%n%) %ch% = (%ch% * __XS_H31__ + (%n% or 0)) % __XS_MH__ end
     if %pp%.c then
       for %ck% = 1, #%pp%.c do
         local %cins% = %pp%.c[%ck%]
@@ -151,7 +152,7 @@ local function %run%(%mod%, ...)
       %code% = %proto%.c, %ip% = 1, %regs% = %NEWREGS%, %top% = 0,
       %scope% = { %varsField% = %NEWVARS%, %parentField% = %parentScope% },
       %va% = nil, %fin% = false, %ret% = nil, %pr% = 0,
-      %x2% = 0, %x3% = 0, %x4% = 0, %st% = 0,
+      %x2% = 0, %x3% = 0, %x4% = 0, %st% = %chainInit%(),
     }
     local %params% = %proto%.p
     for %pi% = 1, #%params% do
@@ -181,9 +182,18 @@ local function %run%(%mod%, ...)
       local %key% = (%ins%[1] - (%mk% + %K_M2%) % %K_MOD%) % %K_MOD%
       local %h% = %H%[%key%]
       if not %h% then error() end
-      %F%.%x2% = (%ins%[2] - (%mk% + 2 * %K_M2%) % %K_MOD%) % %K_MOD%
-      %F%.%x3% = (%ins%[3] - (%mk% + 3 * %K_M2%) % %K_MOD%) % %K_MOD%
-      %F%.%x4% = (%ins%[4] - (%mk% + 4 * %K_M2%) % %K_MOD%) % %K_MOD%
+      local %w2% = (%ins%[2] - (%mk% + 2 * %K_M2%) % %K_MOD%) % %K_MOD%
+      local %w3% = (%ins%[3] - (%mk% + 3 * %K_M2%) % %K_MOD%) % %K_MOD%
+      local %w4% = (%ins%[4] - (%mk% + 4 * %K_M2%) % %K_MOD%) % %K_MOD%
+      -- Undo this opcode's operand order (opPerm in the build): operand j is
+      -- the field named by %pq%[j]. Field values are numbers, never false.
+      local %pq% = %PERM%[%CANON%[%key%] or %key%]
+      local %ps% = %pq%[1]
+      %F%.%x2% = (%ps% == 1 and %w2%) or (%ps% == 2 and %w3%) or %w4%
+      %ps% = %pq%[2]
+      %F%.%x3% = (%ps% == 1 and %w2%) or (%ps% == 2 and %w3%) or %w4%
+      %ps% = %pq%[3]
+      %F%.%x4% = (%ps% == 1 and %w2%) or (%ps% == 2 and %w3%) or %w4%
       %F%.%st% = (%F%.%st% * %K_SA% + (%CANON%[%key%] or %key%) * %K_SB% + %K_SC%) % %K_MOD%
       %F%.%pr% = (%F%.%pr% + 1) % 65536
       %PERIODIC%

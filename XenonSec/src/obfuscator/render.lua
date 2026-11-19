@@ -12,19 +12,24 @@ local genOpaquePredicate = _predicates.genOpaquePredicate
 local _util = load("util")
 local randomIdent, substitute, shuffledRange = _util.randomIdent, _util.substitute, _util.shuffledRange
 local numExpr = _util.numExpr
+local function numOr(v)
+  if math.type(v) == "integer" then return numExpr(v) end
+  return tostring(v)
+end
 
--- Handler self-test. Runs each simple handler against a synthetic frame with
--- known inputs and checks the frame it leaves behind. Numbers are written as
--- arithmetic, and the checks are emitted in a random order. Handlers that
--- depend on scopes, calls or globals are not covered.
+-- Handler self-test (plan in selftest.lua). Each check runs one simple
+-- handler on a synthetic frame and folds the frame into a weighted digest.
+-- The total is compared once, and it is also added to the anti-debug
+-- accumulators, so the decode keys depend on the self-test having run.
 local function renderSelfTest(ensureName, OPNUM, BINNUM, UNNUM, KV)
-  local _opcodes = load("opcodes")
-  local BINOP_SYMBOLS, UNOP_SYMBOLS = _opcodes.BINOP_SYMBOLS, _opcodes.UNOP_SYMBOLS
+  local _selftest = load("selftest")
   local H = ensureName("H")
   local regsF, ipF = ensureName("regs"), ensureName("ip")
   local x2, x3, x4, prF = ensureName("x2"), ensureName("x3"), ensureName("x4"), ensureName("pr")
-  local BINOPS, UNOPS = ensureName("BINOPS"), ensureName("UNOPS")
   local run, hc, brick = ensureName("hrun"), ensureName("hcheck"), ensureName("brick")
+  local fold, acc = ensureName("vl"), ensureName("acc")
+  local rN, ipN = ensureName("hr"), ensureName("hip")
+  local sv = ensureName("selfSum")
   local out = {}
   out[#out + 1] = string.format("local function %s(num, a2, a3, a4, init)", run)
   out[#out + 1] = string.format("  local f = { %s = {}, %s = a2, %s = a3, %s = a4, %s = 1, %s = 7 }",
@@ -34,59 +39,48 @@ local function renderSelfTest(ensureName, OPNUM, BINNUM, UNNUM, KV)
   out[#out + 1] = string.format("  return f.%s, f.%s", regsF, ipF)
   out[#out + 1] = "end"
   out[#out + 1] = string.format("local function %s()", hc)
+  out[#out + 1] = string.format("  local function %s(x)", fold)
+  out[#out + 1] = '    if type(x) == "number" then return x - x % 1 end'
+  out[#out + 1] = '    if type(x) == "string" then return #x + 100 end'
+  out[#out + 1] = "    if x == true then return 11 end"
+  out[#out + 1] = "    if x == false then return 12 end"
+  out[#out + 1] = "    return 13"
+  out[#out + 1] = "  end"
   local groups = {}
-  local function enc(n)
-    local k = math.random(1000, 99999)
-    return string.format("((%d + %d) - %d)", n, k, k)
+  for _, g in ipairs(KV.selfPlan.groups) do
+    local a3 = g.a3
+    if a3 == "@wm" then a3 = numOr(KV.wm) elseif a3 == "@three" then a3 = numOr(KV.three) end
+    local callStr = string.format("%s(%s, %s, %s, %s, %s)", run, numExpr(OPNUM[g.op]), g.a2, a3, g.a4, g.init)
+    local term = " + " .. numExpr(g.w1) .. " * " .. fold .. "(" .. rN .. "[1]) + " .. numExpr(g.w2) ..
+      " * " .. fold .. "(" .. rN .. "[2]) + " .. numExpr(g.w3) .. " * " .. fold .. "(" .. ipN .. ")"
+    groups[#groups + 1] = {
+      "    " .. rN .. ", " .. ipN .. " = " .. callStr,
+      "    " .. acc .. " = (" .. acc .. term .. ") % " .. numExpr(_selftest.DIGEST_P),
+    }
   end
-  local function call(num, a2, a3, a4, init)
-    return string.format("%s(%s, %s, %s, %s, %s)", run, enc(num), a2, a3, a4, init or "{}")
-  end
-  local function group(callStr, cond)
-    groups[#groups + 1] = { "    r, ip = " .. callStr, "    if not (" .. cond .. ") then return false end" }
-  end
-  group(call(OPNUM.LOADK, "1", tostring(KV.wm), "0"), 'r[1] == "Protected by XenonSec" and ip == 2')
-  group(call(OPNUM.LOADTRUE, "1", "0", "0"), "r[1] == true and ip == 2")
-  group(call(OPNUM.LOADFALSE, "1", "0", "0"), "r[1] == false and ip == 2")
-  group(call(OPNUM.LOADNIL, "1", "2", "0", "{[1]=5,[2]=6}"), "r[1] == nil and r[2] == nil and ip == 2")
-  group(call(OPNUM.MOVE, "1", "2", "0", "{[2]=9}"), "r[1] == 9 and ip == 2")
-  group(call(OPNUM.JMP, "40", "0", "0"), "ip == 40")
-  group(call(OPNUM.JF, "1", "40", "0", "{[1]=false}"), "ip == 40")
-  group(call(OPNUM.JF, "1", "40", "0", "{[1]=0}"), "ip == 2")
-  group(call(OPNUM.JT, "1", "40", "0", "{[1]=0}"), "ip == 40")
-  group(call(OPNUM.JT, "1", "40", "0", "{[1]=false}"), "ip == 2")
-  group(call(OPNUM.JNIL, "1", "40", "0", "{}"), "ip == 40")
-  group(call(OPNUM.JNIL, "1", "40", "0", "{[1]=false}"), "ip == 2")
-  for k, sym in ipairs(BINOP_SYMBOLS) do
-    local num = BINNUM[sym]
-    group(call(OPNUM["BIN" .. k], "1", "2", "3", "{[2]=7,[3]=3}"),
-      string.format("r[1] == %s[%s](7, 3) and ip == 2", BINOPS, enc(num)))
-    group(call(OPNUM["BINK" .. k], "1", "2", tostring(KV.three), "{[2]=7}"),
-      string.format("r[1] == %s[%s](7, 3) and ip == 2", BINOPS, enc(num)))
-  end
-  for k, sym in ipairs(UNOP_SYMBOLS) do
-    local v = (sym == "#") and '"abc"' or "5"
-    group(call(OPNUM["UN" .. k], "1", "2", "0", "{[2]=" .. v .. "}"),
-      string.format("r[1] == %s[%s](%s) and ip == 2", UNOPS, enc(UNNUM[sym]), v))
-  end
-  out[#out + 1] = "  local r, ip"
+  out[#out + 1] = string.format("  local %s = 0", acc)
+  out[#out + 1] = string.format("  local %s, %s", rN, ipN)
   for _, gi in ipairs(shuffledRange(#groups)) do
     out[#out + 1] = groups[gi][1]
     out[#out + 1] = groups[gi][2]
   end
-  out[#out + 1] = "    return true"
+  out[#out + 1] = string.format("  return %s", acc)
   out[#out + 1] = "end"
-  out[#out + 1] = string.format("if not %s() then %s() end", hc, brick)
+  out[#out + 1] = string.format("local %s = %s()", sv, hc)
+  -- Fold the total once, into the proto and per-site accumulators only. The
+  -- boot pass has already set the decode chain, so the static key and the chain
+  -- start do not depend on this total (bundle.lua mirrors this split).
+  out[#out + 1] = "if not %selfDone% then"
+  out[#out + 1] = "  %selfDone% = true"
+  out[#out + 1] = "  %adMixP% = %adMixP% + " .. sv .. " * 3"
+  out[#out + 1] = "  %adMixS% = %adMixS% + " .. sv .. " * 5"
+  out[#out + 1] = "end"
   return table.concat(out, "\n")
 end
 
--- Renders the VM engine template: any %N_OPNAME% becomes this build's
--- randomized opcode number; every other %ident% becomes a fresh random
--- identifier (memoized so the same placeholder always maps to the same
--- generated name within this one render).
+-- Renders the VM engine template: substitutes every %placeholder% with a per-build random identifier, opcode number or generated block.
+--------------------------------------------------------------------
 
--- Metamorphic choice: a core handler is the default block or one of its
--- alternatives from templates/core_variants.lua, picked uniformly per build.
 local function pickCoreVariant(block, variants)
   local op = variants and block:match("%%H%%%[%%(OP_[%w_]+)%%%]")
   local alts = op and variants[op]
@@ -111,7 +105,8 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
   local function renderOpAliases()
     local groups = KV and KV.opGroups
     local CANON = ensureName("CANON")
-    if not groups then return "local " .. CANON .. " = {}" end
+    local PERM = ensureName("PERM")
+    if not groups then return "local " .. CANON .. " = {}\nlocal " .. PERM .. " = {}" end
     local H, RK = ensureName("H"), ensureName("RK")
     local names = {}
     for name in pairs(groups) do names[#names + 1] = name end
@@ -130,27 +125,32 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
         canonTbl[#canonTbl + 1] = string.format("[%s] = %s", numExpr(k), numExpr(g[1]))
       end
     end
+    -- Operand order per canonical opcode (see opPerm in bundle.lua).
+    local permTbl = {}
+    for cn, q in pairs(KV.opPerm or {}) do
+      permTbl[#permTbl + 1] = string.format("[%s] = {%s, %s, %s}", numExpr(cn), numExpr(q[1]), numExpr(q[2]), numExpr(q[3]))
+    end
     local resetList = {}
     for _, name in ipairs({ "JMP", "JF", "JT", "JNIL", "RET", "RETM" }) do
       if OPNUM[name] then resetList[#resetList + 1] = string.format("[%s] = true", numExpr(OPNUM[name])) end
     end
-    local M, M1, M2, M3 = tostring(KV.MOD), tostring(KV.M1), tostring(KV.M2), tostring(KV.M3)
-    local SA, SB, SC = tostring(KV.SA), tostring(KV.SB), tostring(KV.SC)
+    local M, M1, M2, M3 = numExpr(KV.MOD), numExpr(KV.M1), numExpr(KV.M2), numExpr(KV.M3)
+    local SA, SB, SC = numExpr(KV.SA), numExpr(KV.SB), numExpr(KV.SC)
+    local LCG_MUL, LCG_MOD = numExpr(16807), numExpr(2147483647)
     local dec, pr = ensureName("dec"), ensureName("protos")
     local seed = KV.rekeySeed or 1
     local rekeyFn = table.concat({
       "local " .. CANON .. " = { " .. table.concat(canonTbl, ", ") .. " }",
+      "local " .. PERM .. " = { " .. table.concat(permTbl, ", ") .. " }",
       "local " .. RK .. " = { g = {" .. table.concat(tbl, ", ") .. "}, s = " .. seed .. " }",
       RK .. ".rekey = function(pi)",
       "  local pp = " .. pr .. "[pi]",
       "  local code = pp.c",
       "  if not code then return end",
       "  local dh = 5381",
-      "  local function hm(n) dh = (dh * 31 + (n or 0)) % 2147483647 end",
+      "  local function hm(n) dh = (dh * " .. numExpr(31) .. " + (n or 0)) % " .. numExpr(2147483647) .. " end",
       "  local RST = { " .. table.concat(resetList, ", ") .. " }",
-      "  -- oc is the decode state of the current instruction. It depends only on",
-      "  -- canonical opcodes, so the rewrite leaves it unchanged.",
-      "  local oc = 0",
+      "  local oc = " .. ensureName("chainInit") .. "()",
       "  for ci = 1, #code do",
       "    local t = code[ci]",
       "    local sd = t[5]",
@@ -158,9 +158,9 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       "    local a2, a3, a4 = " .. dec .. "(t[2], sd, 2, oc), " .. dec .. "(t[3], sd, 3, oc), " .. dec .. "(t[4], sd, 4, oc)",
       "    local canon = " .. CANON .. "[key] or key",
       "    local grp = " .. RK .. ".g[key] or { key }",
-      "    " .. RK .. ".s = (" .. RK .. ".s * 16807) % 2147483647",
+      "    " .. RK .. ".s = (" .. RK .. ".s * " .. LCG_MUL .. ") % " .. LCG_MOD,
       "    local nk = grp[(" .. RK .. ".s % #grp) + 1]",
-      "    " .. RK .. ".s = (" .. RK .. ".s * 16807) % 2147483647",
+      "    " .. RK .. ".s = (" .. RK .. ".s * " .. LCG_MUL .. ") % " .. LCG_MOD,
       "    local ns = " .. RK .. ".s % " .. M,
       "    t[5] = ns",
       "    t[1] = (nk + (ns * " .. M1 .. " + oc * " .. M3 .. " + " .. M2 .. ") % " .. M .. ") % " .. M,
@@ -168,7 +168,7 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       "    t[3] = (a3 + (ns * " .. M1 .. " + oc * " .. M3 .. " + 3 * " .. M2 .. ") % " .. M .. ") % " .. M,
       "    t[4] = (a4 + (ns * " .. M1 .. " + oc * " .. M3 .. " + 4 * " .. M2 .. ") % " .. M .. ") % " .. M,
       "    hm(ns); hm(t[1]); hm(t[2]); hm(t[3]); hm(t[4])",
-      "    if RST[canon] then oc = 0 else oc = (oc * " .. SA .. " + canon * " .. SB .. " + " .. SC .. ") % " .. M .. " end",
+      "    if RST[canon] then oc = " .. ensureName("chainInit") .. "() else oc = (oc * " .. SA .. " + canon * " .. SB .. " + " .. SC .. ") % " .. M .. " end",
       "  end",
       "  pp.i = dh",
       "end",
@@ -200,7 +200,7 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
     return ensureName("F") .. "." .. ensureName("pr")
   end
   resolve = function(tok)
-    if KV.shared and (tok == "byte" or tok == "char" or tok == "concat") then
+    if KV.shared and (tok == "byte" or tok == "char" or tok == "concat" or tok == "adMix" or tok == "adMixP" or tok == "adMixS" or tok == "selfDone") then
       return KV.shared(tok)
     end
     if tok == "ANN_F" then
@@ -253,7 +253,7 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       return string.format("if %s(%s, %s) then return %s(%s, %s) + %s * 0 + %s * 0 end return %s %s %s",
         OK, a, b, fn, a, b, a, b, a, op, b)
     end
-    if tok == "HANDLER_SELFTEST" then return renderSelfTest(ensureName, OPNUM, BINNUM, UNNUM, KV) end
+    if tok == "HANDLER_SELFTEST" then return substitute(renderSelfTest(ensureName, OPNUM, BINNUM, UNNUM, KV), resolve) end
     if tok == "OPALIASES" then return renderOpAliases() end
     if tok == "ADCHECK" then
       if not antiDebug then return "" end
@@ -277,19 +277,19 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
     if tok:sub(1, 2) == "N_" then
       local opname = tok:sub(3)
       assert(OPNUM[opname], "unknown opcode placeholder " .. tok)
-      return tostring(OPNUM[opname])
+      return numOr(OPNUM[opname])
     end
     if tok:sub(1, 3) == "BN_" then
       local tokenName = tok:sub(4)
       for sym, name in pairs(BINOP_TOKEN_NAMES) do
-        if name == tokenName then return tostring(BINNUM[sym]) end
+        if name == tokenName then return numOr(BINNUM[sym]) end
       end
       error("unknown binop placeholder " .. tok)
     end
     if tok:sub(1, 3) == "UN_" then
       local tokenName = tok:sub(4)
       for sym, name in pairs(UNOP_TOKEN_NAMES) do
-        if name == tokenName then return tostring(UNNUM[sym]) end
+        if name == tokenName then return numOr(UNNUM[sym]) end
       end
       error("unknown unop placeholder " .. tok)
     end
@@ -302,15 +302,14 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       -- relative weight per dispatch since it has so few of them, while
       -- a huge script keeps depth modest since this cost is paid on
       -- every single opcode dispatch at runtime. Capped at 8 well
-      -- below the 15-identity pool so genOpaquePredicate never has to
-      -- draw more unique identities than exist.
+      -- within the identity families' sensible range.
       local probe = probeExpr()
       local depthBase = 3 + math.floor(2000 / ((totalInstr or 0) + 400))
       if depthBase > 8 then depthBase = 8 end
       return genOpaquePredicate(probe, depthBase + math.random(0, 2))
     end
     if tok:sub(1, 2) == "K_" then
-      return tostring(KV[tok:sub(3)])
+      return numOr(KV[tok:sub(3)])
     end
     if tok == "NEWREGS" then
       if KV and KV.proxify then
@@ -335,7 +334,7 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       --   VMETA: captured local `name` lives at store[name].
       local RM, VM = ensureName("RMETA"), ensureName("VMETA")
       local pt, pk, pv, pb = ensureName("pxt"), ensureName("pxk"), ensureName("pxv"), ensureName("pxb")
-      local A, B, M = tostring(KV.PA), tostring(KV.PB), tostring(KV.PM)
+      local A, B, M = numOr(KV.PA), numOr(KV.PB), numOr(KV.PM)
       return table.concat({
         "local " .. RM .. " = {}",
         RM .. ".__index = function(" .. pt .. ", " .. pk .. ") local " .. pb .. " = " .. pt .. "[0][(" .. pk .. " * " .. pt .. "[-1] + " .. pt .. "[-2]) % " .. M .. "]; if " .. pb .. " then return " .. pb .. "[1] end return nil end",
@@ -363,7 +362,7 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       -- one is decoded again on its next use.
       local flush = ""
       if KV and KV.flush then
-        flush = " if " .. probeExpr() .. " % " .. tostring(KV.flushEvery or 65536) .. " == 0 then for " ..
+        flush = " if " .. probeExpr() .. " % " .. numOr(KV.flushEvery or 65536) .. " == 0 then for " ..
                 ensureName("fk") .. " in pairs(" .. ensureName("consts") .. ") do rawset(" ..
                 ensureName("consts") .. ", " .. ensureName("fk") .. ", nil) end " ..
                 "for " .. ensureName("fk") .. " in pairs(" .. ensureName("scache") .. ") do rawset(" ..

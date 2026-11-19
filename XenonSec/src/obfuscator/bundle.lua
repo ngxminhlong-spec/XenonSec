@@ -171,7 +171,7 @@ local function buildBundle(mod, opts)
   --       covered by the exact same checksum as everything else, so if
   --       it doesn't decode back to exactly the right text, that's the
   --       same signal as any other tamper -- not a separate mechanism.
-  local watermarkIdx = addConst(mod, "Protected by XenonSec")
+  local watermarkIdx = addConst(mod, _util.watermark())
   local antiPre = {}
   if opts.antiDebug then
     for _, nm in ipairs(ANTI_NAMES) do antiPre[nm] = addConst(mod, nm) end
@@ -252,7 +252,8 @@ local function buildBundle(mod, opts)
   local escSet = {}
   escSet[watermarkIdx] = true
   escSet[threeIdx] = true
-  for _, idx in pairs(antiIdx) do escSet[idx] = true end
+  local antiSet = {}
+  for _, idx in pairs(antiIdx) do escSet[idx] = true; antiSet[idx] = true end
   for pi = mod.rawFirst or 1, mod.rawLast or 0 do
     local proto = mod.protos[pi]
     for _, instr in ipairs(proto.code) do
@@ -305,6 +306,18 @@ local function buildBundle(mod, opts)
     for _ = 1, aliasCount[name] do group[#group + 1] = freeKey() end
     opGroups[name] = group
   end
+  -- Per-build operand order: operand j of canonical opcode op is stored in
+  -- field opPerm[op][j] + 1 (fields 2..4). The dispatcher undoes it with the
+  -- same table, so the same handler reads different fields per opcode.
+  local opPerm = {}
+  for _, name in ipairs(OPCODES) do
+    local q = { 1, 2, 3 }
+    for i = 3, 2, -1 do
+      local j = math.random(1, i)
+      q[i], q[j] = q[j], q[i]
+    end
+    opPerm[OPNUM[name]] = q
+  end
   local BINNUM = {}
   for _, sym in ipairs(BINOP_SYMBOLS) do BINNUM[sym] = freeKey() end
   local UNNUM = {}
@@ -328,6 +341,32 @@ local function buildBundle(mod, opts)
   local tagF, tagZ, tagNaN = tagPerm[3], tagPerm[4], tagPerm[5]
   local tagI = tagPerm[6]
   local vaultData = buildVault(key)
+  -- Anti-debug tokens: each check that runs at boot adds a build-time token
+  -- to all three key accumulators in the runtime (see antidebug.lua). The
+  -- three keys below are what the runtime derives when every check runs and
+  -- reports clean; the accumulators weight the tokens 1, 3 and 5.
+  local adTokens, tokSum = {}, 0
+  if opts.antiDebug then
+    for _, ci in ipairs({ 1, 2, 3, 4, 5, 11, 12, 13, 14 }) do
+      adTokens[ci] = math.random(1, 1048575)
+      tokSum = tokSum + adTokens[ci]
+    end
+  end
+  local function shiftKey(k, st)
+    if st == 0 then return k end
+    local sh = (st % 255) + 1
+    local out = {}
+    for i = 1, #k do out[i] = xor8(k[i], sh) end
+    return out
+  end
+  -- The handler self-test total (selftest.lua) is folded into the proto and
+  -- per-site keys only. The runtime folds it once, after the boot pass, so the
+  -- static key and the chain start must not include it.
+  local keyA = shiftKey(key, tokSum)       -- static constants, checksum
+  local tokFolded = tokSum + (opts.selfE or 0)
+  local keyP = shiftKey(key, 3 * tokFolded)   -- proto keys
+  local keyS = shiftKey(key, 5 * tokFolded)   -- per-site constant keys
+  local chainInit = (tokSum * stepA) % MOD
   local cipherConsts = {}
   -- Number encoding is lossless. tostring() keeps only 14 digits and drops the
   -- sign of -0.0, so:
@@ -355,9 +394,9 @@ local function buildBundle(mod, opts)
   local SITE_RESET = { JMP = true, JF = true, JT = true, JNIL = true, RET = true, RETM = true }
   for pi, proto in ipairs(mod.protos) do
     if not (pi >= (mod.rawFirst or 1) and pi <= (mod.rawLast or 0)) then
-      local cur = 0
+      local cur = chainInit
       for _, instr in ipairs(proto.code) do
-        if SITE_RESET[instr.op] then cur = 0 else cur = (cur * stepA + OPNUM[instr.op] * stepB + stepC) % MOD end
+        if SITE_RESET[instr.op] then cur = chainInit else cur = (cur * stepA + OPNUM[instr.op] * stepB + stepC) % MOD end
         local cf = constField(instr.op)
         if cf then
           shuffledConsts[#shuffledConsts + 1] = shuffledConsts[instr[cf]]
@@ -368,12 +407,12 @@ local function buildBundle(mod, opts)
     end
   end
 
-  local function deriveProtoKey(nonce)
+  local function deriveProtoKey(nonce, base)
     local s = (CIPHER.basis + nonce) % 16777216
     local out = {}
-    for i = 1, #key do
+    for i = 1, #base do
       s = (s * CIPHER.mult + CIPHER.add) % 16777216
-      out[i] = xor8(key[i], math.floor(s / 65536) % 256)
+      out[i] = xor8(base[i], math.floor(s / 65536) % 256)
     end
     return out
   end
@@ -402,7 +441,10 @@ local function buildBundle(mod, opts)
     else
       tagged = string.char(tagS) .. v
     end
-    cipherConsts[i] = cipherEncrypt(tagged, siteState[i] and deriveProtoKey(siteState[i]) or key)
+    -- Anti-debug names are read before the boot pass has added its tokens,
+    -- so they use the raw key (see %dname% in the header).
+    local ck = antiSet[i] and key or (siteState[i] and deriveProtoKey(siteState[i], keyS) or keyA)
+    cipherConsts[i] = cipherEncrypt(tagged, ck)
   end
 
   -- 4.5. Opcode encoding. Every stored opcode is (key + salt(ip)) mod MOD,
@@ -501,7 +543,7 @@ local function buildBundle(mod, opts)
     end
     local raw = {}
     local ih = 5381
-    local cur = 0 -- decode state seen by the next instruction
+    local cur = chainInit -- decode state seen by the next instruction
     local seedState = nonce
     for _, instr in ipairs(proto.code) do
       -- Park-Miller seed stream from the nonce; the runtime repeats this exactly.
@@ -509,22 +551,26 @@ local function buildBundle(mod, opts)
       local seed = seedState % MOD
       local group = opGroups[instr.op]
       local opn = group[math.random(1, #group)]
-      local a = instr.a or 0
-      local b = instr.b or 0
-      local c = instr.c or 0
-      raw[#raw + 1] = packRecord({ opn, a, b, c })
-      local eop, ea = encodeField(opn, seed, 1, cur), encodeField(a, seed, 2, cur)
-      local eb, ec = encodeField(b, seed, 3, cur), encodeField(c, seed, 4, cur)
+      local ops = { instr.a or 0, instr.b or 0, instr.c or 0 }
+      -- Operand j lands in field opPerm[op][j] + 1 (fields 2..4).
+      local q = opPerm[OPNUM[instr.op]]
+      local f = {}
+      for j = 1, 3 do f[q[j]] = ops[j] end
+      raw[#raw + 1] = packRecord({ opn, f[1], f[2], f[3] })
+      local eop = encodeField(opn, seed, 1, cur)
+      local ea = encodeField(f[1], seed, 2, cur)
+      local eb = encodeField(f[2], seed, 3, cur)
+      local ec = encodeField(f[3], seed, 4, cur)
       -- Same order the runtime hashes decoded tuples: seed, op, a, b, c.
       ih = mixChecksum(ih, seed); ih = mixChecksum(ih, eop); ih = mixChecksum(ih, ea)
       ih = mixChecksum(ih, eb); ih = mixChecksum(ih, ec)
       -- Canonical opcode (not the alias) drives the chain, so rekeying an
       -- alias or seed never changes the state a running frame expects.
-      if STATE_RESET[instr.op] then cur = 0 else cur = (cur * stepA + OPNUM[instr.op] * stepB + stepC) % MOD end
+      if STATE_RESET[instr.op] then cur = chainInit else cur = (cur * stepA + OPNUM[instr.op] * stepB + stepC) % MOD end
     end
     local body = table.concat(raw)
     if rawF == 0 then body = lzmaCompress(body, mod.lzD) end
-    local blob = cipherEncrypt(body, deriveProtoKey(nonce))
+    local blob = cipherEncrypt(body, deriveProtoKey(nonce, keyP))
     -- Runtime-decoder protos are stored as bytes; the rest as base85 text.
     local stored = (rawF == 1) and blob or encodeB85(blob)
 
@@ -555,7 +601,7 @@ local function buildBundle(mod, opts)
       psum, ra, rb, nonce, ih, bucketLen(#table.concat(raw)), #blob, luaBytes(stored)
     )
   end
-  checksum = keyedFinal(checksum, key)
+  checksum = keyedFinal(checksum, keyA)
 
   return {
     cipherConsts = cipherConsts,
@@ -568,12 +614,14 @@ local function buildBundle(mod, opts)
     saltM2 = saltM2,
     mod = MOD,
     key = key,
+    adTokens = adTokens,
     maskA = maskA,
     protoLits = protoLits,
     mainProto = mod.mainProto,
     decMain = mod.decMain,
     OPNUM = OPNUM,
     opGroups = opGroups,
+    opPerm = opPerm,
     BINNUM = BINNUM,
     UNNUM = UNNUM,
     freeKey = freeKey,

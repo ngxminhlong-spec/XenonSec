@@ -82,15 +82,36 @@ end
 -- never appears in the generated code (table keys, indexes, opcode numbers).
 local function numExpr(n)
   local k = math.random(1000, 99999)
-  return string.format("((%d+%d)-%d)", n, k, k)
+  -- Write n+k and k, never n itself: the literal n does not appear anywhere.
+  return string.format("((%d)-%d)", n + k, k)
+end
+
+-- Per-build watermark text. The functional constant (bundle), its check in
+-- the VM (render) and its check in the header all read this one value, so
+-- it differs between builds. The attribution comment stays as is.
+local watermarkText
+local function newWatermark()
+  local chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+  local t = {}
+  for i = 1, 16 do
+    local k = math.random(1, #chars)
+    t[i] = chars:sub(k, k)
+  end
+  watermarkText = "XS" .. table.concat(t)
+  return watermarkText
+end
+local function watermark()
+  return watermarkText or newWatermark()
 end
 
 return {
   byteXor = byteXor,
   minifyTemplateText = minifyTemplateText,
+  newWatermark = newWatermark,
   numExpr = numExpr,
   randomByteKey = randomByteKey,
   randomIdent = randomIdent,
   shuffledRange = shuffledRange,
   substitute = substitute,
+  watermark = watermark,
 }
