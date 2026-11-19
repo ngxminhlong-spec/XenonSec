@@ -416,9 +416,9 @@ local function obfuscateOnce(source, chunkname, opts)
   -- of a table, so the file is one setmetatable(...):Ms()(...) expression.
   local wrapForm = { "return setmetatable({Ms=function(self) return function(...)\n", "\nend end},{}):Ms()(...)\n" }
   local wrapHead, wrapTail = wrapForm[1], wrapForm[2]
-  local ckHashes, dumpPrefix = { 0, 0, 0, 0 }, ""
+  local ckHashes, dumpPrefix = { 0, 0 }, ""
   if opts.antiDebug and not useTypes and _VERSION == "Lua 5.3" then
-    local zeroed = (header:gsub("__XS_CKH__", "0,0,0,0"))
+    local zeroed = (header:gsub("__XS_CKH__", "0,0"))
     zeroed = (zeroed:gsub("__XS_DPFX__", '""'))
     local probeSrc = wrapHead .. zeroed .. "\nreturn " ..
       resolveShared("CKS") .. wrapTail
@@ -431,7 +431,7 @@ local function obfuscateOnce(source, chunkname, opts)
       for j = 1, #str do h = (h * 31 + str:byte(j)) % 2147483647 end
       return h
     end
-    for i = 1, 4 do
+    for i = 1, 2 do
       local dump = string.dump(checks[i], true)
       ckHashes[i] = hashOf(dump)
       if i == 1 then dumpPrefix = dump:sub(1, 33) end

@@ -112,22 +112,25 @@ do
 end
 
 do
-  -- debug.sethook simulates an attached debugger; must be caught.
+  -- The timing probe (live check 1) reads os.clock. A debugger that pauses or
+  -- steps inside the probe makes it take far longer than a clean run; a clock
+  -- that advances a full second on every read stands in for that at boot.
   local src = 'print("secret2")'
   local out = Obf.obfuscate(src, "t", { antiDebug = true })
   local captured = {}
-  local realPrint = print
+  local realPrint, realClock = print, os.clock
   print = function(...)
     local p = {}
     for i = 1, select("#", ...) do p[i] = tostring((select(i, ...))) end
     captured[#captured + 1] = table.concat(p, "\t")
   end
-  debug.sethook(function() end, "", 1000000) -- a real, if trivial, hook
+  local fake = 0
+  os.clock = function() fake = fake + 1; return fake end
   local chunk = load(out, "t")
   local ok, err = pcall(chunk)
-  debug.sethook()
+  os.clock = realClock
   print = realPrint
-  check("an active debug hook is detected and neutralized", not ok and #captured == 0,
+  check("a slow timing probe at boot is detected and neutralized", not ok and #captured == 0,
     ("ok=%s captured=%d err=%s"):format(tostring(ok), #captured, tostring(err)))
 end
 
@@ -246,30 +249,33 @@ end
 
 
 do
-  -- A debugger attached AFTER startup must still be caught: the periodic
-  -- check in the dispatch loop, not just the one-shot startup probe.
+  -- The clock starts jumping partway through the run, as it would if a
+  -- debugger paused inside a periodic probe. The periodic checks must notice.
   local src = [[
     local n = 0
     for i = 1, 20000 do n = n + i end
-    debug.sethook(function() end, "", 1000000)
-    local m = 0
-    for i = 1, 20000 do m = m + i end
-    debug.sethook()
-    print("finished", n, m)
+    print("finished", n)
   ]]
   local out = Obf.obfuscate(src, "t", { antiDebug = true })
   local captured = {}
-  local realPrint = print
+  local realPrint, realClock = print, os.clock
   print = function(...)
     local p = {}
     for i = 1, select("#", ...) do p[i] = tostring((select(i, ...))) end
     captured[#captured + 1] = table.concat(p, "\t")
   end
+  local calls, fake = 0, 0
+  os.clock = function()
+    calls = calls + 1
+    if calls < 200 then return realClock() end
+    fake = fake + 1
+    return fake
+  end
   local chunk = load(out, "t")
   local ok, err = pcall(chunk)
-  debug.sethook()
+  os.clock = realClock
   print = realPrint
-  check("mid-run debugger attach is detected (periodic check)", not ok and #captured == 0,
+  check("a clock that jumps mid-run is caught by the periodic probe", not ok and #captured == 0,
     ("ok=%s captured=%d err=%s"):format(tostring(ok), #captured, tostring(err)))
 end
 
@@ -311,46 +317,34 @@ local function detectCase(name, src, setup, teardown)
 end
 
 do
-  -- Check 3: a wrapper around debug.gethook installed BEFORE load is caught
-  -- by the native check, because the captured hook probe is a Lua function.
-  local src = 'print("wrapped")'
-  local realGethook = debug.gethook
-  detectCase("a wrapped debug.gethook (installed before load) is detected", src,
-    function(chunk)
-      debug.gethook = function(...) return realGethook(...) end
-      local out = Obf.obfuscate(src, "t", { antiDebug = true })
-      return load(out, "t")
-    end,
-    function() debug.gethook = realGethook end)
-end
-
-do
-  -- Check 2: a hook on a running coroutine (not the main thread) is caught.
-  local src = 'print("in coroutine")'
-  detectCase("a debug hook on a coroutine is detected", src,
-    function(chunk)
-      local co = coroutine.create(chunk)
-      debug.sethook(co, function() end, "", 1000000)
-      return function() local okc, errc = coroutine.resume(co); if not okc then error(errc) end; return errc end
-    end,
-    nil)
-end
-
-do
-  -- Check 4: the debug library's fields are compared with what was captured at
-  -- load. Replacing one after load is caught by the periodic checks.
+  -- Live check 2: the builtins the engine reads are compared with what was
+  -- captured at load. The payload replaces pcall partway through the run, so
+  -- the captured value is the original and the periodic check must notice.
   local src = "local n = 0 for i = 1, 50000 do n = n + i end print('done', n)"
-  local realGethook = debug.gethook
-  detectCase("a debug field replaced after load is detected (cross-check)", src,
-    function(chunk)
-      return function()
-        debug.gethook = function(...) return realGethook(...) end
-        local r = chunk()
-        return r
-      end
-    end,
-    function() debug.gethook = realGethook end)
+  local out = Obf.obfuscate(src, "t", { antiDebug = true })
+  local captured = {}
+  local realPrint, realPcall, realClock = print, pcall, os.clock
+  print = function(...)
+    local p = {}
+    for i = 1, select("#", ...) do p[i] = tostring((select(i, ...))) end
+    captured[#captured + 1] = table.concat(p, "\t")
+  end
+  local calls = 0
+  os.clock = function()
+    calls = calls + 1
+    if calls == 200 then pcall = function(...) return realPcall(...) end end
+    return realClock()
+  end
+  local chunk = load(out, "t")
+  local ok, err = realPcall(chunk)
+  os.clock = realClock
+  pcall = realPcall
+  print = realPrint
+  check("a builtin replaced after load is detected (cross-check)", not ok and #captured == 0,
+    ("ok=%s captured=%d err=%s"):format(tostring(ok), #captured, tostring(err)))
 end
+
+
 
 do
   -- Placement: the periodic checks are emitted at several points, and the
@@ -361,7 +355,7 @@ do
   local shape = "if [%w_%.]+%s*%%%s*%d+%s*==%s*%d+%s*then%s*[%w_]+%(%d+%)%s*end"
   local out = Obf.obfuscate(src, "t", { antiDebug = true })
   local _, calls = out:gsub(shape, "")
-  check("anti-debug build places several periodic checks", calls >= 3, "placements=" .. calls)
+  check("anti-debug build places both periodic checks", calls >= 2, "placements=" .. calls)
   local plain = Obf.obfuscate(src, "t", {})
   local _, plainCalls = plain:gsub(shape, "")
   check("antiDebug off places no periodic checks", plainCalls == 0, "placements=" .. plainCalls)
@@ -470,8 +464,8 @@ do
   local ok, got = runOutput(out)
   check("unpatched anti-debug build prints the expected values", ok and got == expected,
     "ok=" .. tostring(ok) .. " got=" .. tostring(got))
-  -- The boot loop runs checks 1..5 once each; start it at 2 to skip check 1.
-  local patched, n = out:gsub("for (%w+)%s*=%s*1%s*,%s*5%s*do%s*(%w+)%(%1%s*,%s*true%s*%)%s*end", "for %1=2,5 do %2(%1,true)end")
+  -- The boot loop runs checks 1 and 2 once each; start it at 2 to skip check 1.
+  local patched, n = out:gsub("for (%w+)%s*=%s*1%s*,%s*2%s*do%s*(%w+)%(%1%s*,%s*true%s*%)%s*end", "for %1=2,2 do %2(%1,true)end")
   check("boot loop is found for patching", n == 1, "n=" .. n)
   local okP, gotP, errP = runOutput(patched)
   check("skipping one check's boot pass breaks decoding elsewhere",

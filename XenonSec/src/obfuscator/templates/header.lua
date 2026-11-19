@@ -446,7 +446,7 @@ local %escDec% = setmetatable({}, { __index = function(%et%, %ei%)
   return %ev%
 end })
 local %consts% = setmetatable({}, { __index = function(%ct%, %i2%)
-  if __XS_ANTIDEBUG__ then %adStep%(%i2% % 5 + 1) end
+  if __XS_ANTIDEBUG__ then %adStep%(%i2% % 3 == 2 and 5 or (%i2% % 3 + 1)) end
   local %val% = %constval%(%rawdec%(%i2%))
   rawset(%ct%, %i2%, %val%)
   return %val%

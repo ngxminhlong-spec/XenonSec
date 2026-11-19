@@ -87,7 +87,7 @@ local function decoyHandlerCount(totalInstr, strength)
 end
 
 -- Anti-debug names live in the encrypted constant pool, never as plaintext.
-local ANTI_NAMES = { "debug", "gethook", "getinfo", "coroutine", "running" }
+local ANTI_NAMES = { "os", "clock" }
 
 local function xor8(x, y)
   local r, bit = 0, 1
@@ -347,7 +347,7 @@ local function buildBundle(mod, opts)
   -- reports clean; the accumulators weight the tokens 1, 3 and 5.
   local adTokens, tokSum = {}, 0
   if opts.antiDebug then
-    for _, ci in ipairs({ 1, 2, 3, 4, 5, 11, 12, 13, 14 }) do
+    for _, ci in ipairs({ 1, 2, 5, 11, 12 }) do
       adTokens[ci] = math.random(1, 1048575)
       tokSum = tokSum + adTokens[ci]
     end

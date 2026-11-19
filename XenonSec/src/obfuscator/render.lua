@@ -257,16 +257,16 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
     if tok == "OPALIASES" then return renderOpAliases() end
     if tok == "ADCHECK" then
       if not antiDebug then return "" end
-      -- Three anti-debug checks in the dispatch loop, each at its own random
+      -- Two live anti-debug checks in the dispatch loop, each at its own random
       -- period and residue of the step counter, so the points where the checks
       -- run differ from build to build. Each one calls adStep with a random
       -- check index (see the anti-debug block in the header).
       local step = ensureName("adStep")
       local out = {}
-      -- Every live check (indexes 1-4) runs in every build, each at its own
+      -- Every live check (indexes 1-2) runs in every build, each at its own
       -- random period and residue. Before, three indexes were drawn at random,
       -- so a build could skip the check that catches an attached debugger.
-      for index = 1, 4 do
+      for index = 1, 2 do
         local period = math.random(257, 1499)
         local residue = math.random(0, period - 1)
         out[#out + 1] = string.format("if %s %% %d == %d then %s(%d) end",
