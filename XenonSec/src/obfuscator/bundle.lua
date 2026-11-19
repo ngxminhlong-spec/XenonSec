@@ -88,6 +88,8 @@ end
 
 -- Anti-debug names live in the encrypted constant pool, never as plaintext.
 local ANTI_NAMES = { "os", "clock" }
+-- Added only with opts.hookCheck: the debug library entries the hook check reads.
+local HOOK_NAMES = { "debug", "gethook", "sethook" }
 
 local function xor8(x, y)
   local r, bit = 0, 1
@@ -174,7 +176,12 @@ local function buildBundle(mod, opts)
   local watermarkIdx = addConst(mod, _util.watermark())
   local antiPre = {}
   if opts.antiDebug then
-    for _, nm in ipairs(ANTI_NAMES) do antiPre[nm] = addConst(mod, nm) end
+    local names = {}
+    for _, nm in ipairs(ANTI_NAMES) do names[#names + 1] = nm end
+    if opts.hookCheck then
+      for _, nm in ipairs(HOOK_NAMES) do names[#names + 1] = nm end
+    end
+    for _, nm in ipairs(names) do antiPre[nm] = addConst(mod, nm) end
   end
   -- The handler self-test needs a constant 3 to drive the BINK check.
   local threePre = addConst(mod, 3)

@@ -61,6 +61,8 @@ end
 local FOOTER_TEMPLATE = load("templates/footer")
 local HEADER_TEMPLATE = load("templates/header")
 local ANTIDEBUG_TEMPLATE = load("templates/antidebug")
+local HOOKCHECK_TEMPLATE = load("templates/hookcheck")
+local HOOKSTUB_TEMPLATE = load("templates/hookstub")
 local VM_TEMPLATE = load("templates/vm")
 local CORE_BLOCKS = load("templates/core_handlers")
 local CORE_VARIANTS = load("templates/core_variants")
@@ -106,6 +108,7 @@ local DEFAULTS = {
   flushConsts = true,  -- periodic flush of the decoded-constant cache (see PERIODIC)
   flushEvery = 65536,  -- steps between flushes: a dump sees only recently used constants
   antiDebug = false,   -- debug-hook, native-hook and env-logger checks; false-positive risk, opt-in
+  hookCheck = false,   -- adds the debug.gethook check and its sentinel test (needs antiDebug; uses the debug library)
   proxify = false,     -- ProxifyLocal: registers and captured locals live in proxy objects (slower)
   strength = 2,        -- 1..4: scales decoy handlers and decoy constants (size vs. clutter)
 }
@@ -264,7 +267,11 @@ local function obfuscateOnce(source, chunkname, opts)
   -- Anti-debug machinery is emitted only for anti-debug builds.
   if opts.antiDebug then
     local adTpl = opts.minify and minifyTemplateText(ANTIDEBUG_TEMPLATE) or ANTIDEBUG_TEMPLATE
+    local hookTpl = opts.hookCheck and HOOKCHECK_TEMPLATE or HOOKSTUB_TEMPLATE
+    if opts.minify then hookTpl = minifyTemplateText(hookTpl) end
+    local hookText = substitute(hookTpl, resolveShared)
     local adText = substitute(adTpl, resolveShared)
+    adText = (adText:gsub("__XS_HOOKBLOCK__", function() return hookText end))
     header = header:gsub("__XS_ADBLOCK__", function() return adText end)
   else
     header = header:gsub("__XS_ADBLOCK__", function() return "" end)

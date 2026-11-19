@@ -4,10 +4,12 @@
 -- point). Inserted into the header only when antiDebug is on; the header
 -- places it at __XS_ADBLOCK__ and it uses the header's names via %placeholders%.
 --
--- No debug library is used here. A deobfuscator can replace debug.gethook or
--- debug.getinfo before the program loads, which would make such checks report
--- clean. The checks below read only plain globals and os.clock, and each one
--- is also compared against its own known-answer mock at load.
+-- The default build reads no debug library: a deobfuscator can replace
+-- debug.gethook or debug.getinfo before the program loads, which would make
+-- such checks report clean. The checks read only plain globals and os.clock,
+-- and each one is also compared against its own known-answer mock at load.
+-- The hookCheck option adds one hook check that does use debug.gethook (see
+-- templates/hookcheck.lua), with its own self-test against replacement.
 --------------------------------------------------------------------
 
 return [===[
@@ -31,6 +33,7 @@ if __XS_ANTIDEBUG__ then
     if %cok% and %cf% then %clockFn% = %cf% end
   end
 end
+__XS_HOOKBLOCK__
 
 -- Each check returns a number: 0 when it sees nothing, nonzero when it does.
 -- Nothing branches on a check's outcome. The result is summed into the key
@@ -45,8 +48,10 @@ end
 local %PROBE_N% = 200
 local %PROBE_LIMIT% = 0.05
 
--- 1: the timing probe ran far longer than the clean-run time.
+-- 1: a foreign hook is set (hookCheck builds), or the timing probe ran far
+-- longer than the clean-run time.
 local %ck1% = function(%e%)
+  if %e%.hook then return 71 end
   local %t% = %e%.elapsed
   if %t% == nil then return 0 end
   if %t% > %PROBE_LIMIT% then return 53 end
@@ -72,6 +77,7 @@ local %realEnv% = function()
     %e%.elapsed = nil
   end
   %e%.pcall = %base%[__XS_KS_pcall__]
+  if %hookGet% then %e%.hook = %hookGet%() else %e%.hook = nil end
   return %e%
 end
 
@@ -87,6 +93,7 @@ local %STC% = {
   { %ck1%, { elapsed = nil }, 0 },
   { %ck2%, { pcall = %pcallC% }, 0 },
   { %ck2%, { pcall = %hookOn% }, 61 },
+  { %ck1%, { elapsed = 0, hook = %hookOn% }, 71 },
 }
 local %selfTest% = function()
   local %bad% = 0
@@ -94,7 +101,7 @@ local %selfTest% = function()
     local %t% = %STC%[%ti%]
     if %t%[1](%t%[2]) ~= %t%[3] then %bad% = %bad% + 1 end
   end
-  return %bad%
+  return %bad% + %hookST%()
 end
 
 -- Code check: each check's string.dump (stripped) hashed at build time. The
