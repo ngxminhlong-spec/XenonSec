@@ -359,12 +359,13 @@ local function buildBundle(mod, opts)
     for i = 1, #k do out[i] = xor8(k[i], sh) end
     return out
   end
+  -- The handler self-test total (selftest.lua) is folded into the proto and
+  -- per-site keys only. The runtime folds it once, after the boot pass, so the
+  -- static key and the chain start must not include it.
   local keyA = shiftKey(key, tokSum)       -- static constants, checksum
-  local keyP = shiftKey(key, 3 * tokSum)   -- proto keys
-  local keyS = shiftKey(key, 5 * tokSum)   -- per-site constant keys
-  -- Every decode-state chain starts here instead of at zero, so the boot
-  -- tokens also gate instruction decoding. The runtime starts its chains from
-  -- (boot sum * stepA) % MOD, which is zero when anti-debug is off.
+  local tokFolded = tokSum + (opts.selfE or 0)
+  local keyP = shiftKey(key, 3 * tokFolded)   -- proto keys
+  local keyS = shiftKey(key, 5 * tokFolded)   -- per-site constant keys
   local chainInit = (tokSum * stepA) % MOD
   local cipherConsts = {}
   -- Number encoding is lossless. tostring() keeps only 14 digits and drops the

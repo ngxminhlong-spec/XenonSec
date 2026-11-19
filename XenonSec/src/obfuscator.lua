@@ -203,6 +203,9 @@ local function obfuscateOnce(source, chunkname, opts)
   if opts.junkRate and opts.junkRate > 0 then Junk.inject(mod, opts.junkRate) end
   if opts.flatten ~= false then Passes.flatten(mod, math.random, opts.strength or 1) end
   Passes.insertStateBarriers(mod)
+  -- Self-test plan first: its total is part of the key material (bundle).
+  opts.selfPlan = load("selftest").plan(_util.watermark())
+  opts.selfE = opts.selfPlan.expected
   local bundle = buildBundle(mod, opts)
   -- Luau type syntax (TypeMangler decoys, frame annotations) is emitted only
   -- for Luau output that wants it. typeMangler = false keeps Luau output
@@ -232,7 +235,7 @@ local function obfuscateOnce(source, chunkname, opts)
       wm = bundle.watermarkIdx, three = bundle.threeIdx,
       minifyFn = opts.minify and minifyTemplateText or nil, luauTypes = useTypes,
       scatterType = scatterType,
-      opGroups = bundle.opGroups, opPerm = bundle.opPerm, rekeySeed = math.random(1, 2147483646),
+      opGroups = bundle.opGroups, opPerm = bundle.opPerm, selfPlan = opts.selfPlan, rekeySeed = math.random(1, 2147483646),
       shared = function(tok) return resolveShared(tok) end })
   -- Hash constants used by the engine's own checksum functions, masked the
   -- same way as the header's.

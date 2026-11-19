@@ -43,6 +43,7 @@ local %kbad% = false
 local %adMix% = 0
 local %adMixP% = 0
 local %adMixS% = 0
+local %selfDone% = false
 local %adStep% = function() end
 -- Decode-state chain start, set by the boot pass (zero when anti-debug is off).
 local %bootSt% = 0
