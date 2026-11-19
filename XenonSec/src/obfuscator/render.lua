@@ -312,8 +312,7 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
       -- relative weight per dispatch since it has so few of them, while
       -- a huge script keeps depth modest since this cost is paid on
       -- every single opcode dispatch at runtime. Capped at 8 well
-      -- below the 15-identity pool so genOpaquePredicate never has to
-      -- draw more unique identities than exist.
+      -- within the identity families' sensible range.
       local probe = probeExpr()
       local depthBase = 3 + math.floor(2000 / ((totalInstr or 0) + 400))
       if depthBase > 8 then depthBase = 8 end

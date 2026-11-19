@@ -13,47 +13,79 @@
 -- one build and across builds of the same script.
 --------------------------------------------------------------------
 
-local OPAQUE_IDENTITIES = {
-  "((V*V-V)%2==0)",                          -- v^2 - v is always even
-  "(((V+1)*(V+1)-V*V-2*V-1)==0)",             -- (v+1)^2 - v^2 - 2v - 1 == 0
-  "((V%2)*(V%2)==(V%2))",                     -- v mod 2 is idempotent under squaring
-  "(((V*V)%4)~=2)",                           -- v^2 mod 4 is never 2
-  "(((V-V)*(V+7))==0)",                       -- v - v is always 0
-  "((V*3-V*2-V)==0)",                         -- 3v - 2v - v == 0
-  "(((V*V+V)%2)==0)",                         -- v^2 + v is always even
-  "(((V*(V+1)*(V+2))%6)==0)",                 -- product of 3 consecutive ints divisible by 6
-  "((((V*V*V)-V)%6)==0)",                     -- v^3 - v divisible by 6 (v(v-1)(v+1))
-  "(((V+V)%2)==0)",                           -- v + v is always even
-  "((V*V)>=0)",                               -- a square is never negative
-  "((V==V))",                                 -- reflexivity
-  "(not (V~=V))",                             -- negated-inequality reflexivity
-  "(((V*5-V*4-V))==0)",                       -- 5v - 4v - v == 0
-  "(((V*V-V*V))==0)",                         -- v^2 - v^2 == 0
+local dir = debug.getinfo(1, "S").source:match("@?(.*/)") or "./"
+local load = dofile(dir .. "loader.lua")
+local numExpr = load("util").numExpr
+
+-- Identity families. Each generator takes the probe expression p (a runtime
+-- counter, always an integer in 0..65535) and returns one predicate with
+-- fresh random constants. Every instance is true (or false) for every such
+-- p, so the gate never changes behaviour. The constants differ per gate and
+-- per build, so no fixed text pattern matches them.
+local function K(n) return numExpr(n) end
+
+local TRUE_FAMILIES = {
+  -- p*(p+k) is even when k is odd
+  function(p)
+    local k = 2 * math.random(0, 49) + 1
+    return string.format("((%s*(%s+%s))%%2==0)", p, p, K(k))
+  end,
+  -- (p+k)^2 - p*(p+2k) == k^2
+  function(p)
+    local k = math.random(1, 99)
+    return string.format("(((%s+%s)*(%s+%s)-%s*(%s+%s))==%s)", p, K(k), p, K(k), p, p, K(2 * k), K(k * k))
+  end,
+  -- (k+1)p - kp - p == 0
+  function(p)
+    local k = math.random(2, 99)
+    return string.format("((%s*%s-%s*%s-%s)==0)", K(k + 1), p, K(k), p, p)
+  end,
+  -- p mod m is below m
+  function(p)
+    local m = math.random(2, 999)
+    return string.format("((%s%%%s)<%s)", p, K(m), K(m))
+  end,
+  -- p*p is never negative
+  function(p)
+    return string.format("((%s*%s)>=0)", p, p)
+  end,
+  -- (p-p)*k == 0
+  function(p)
+    local k = math.random(2, 99)
+    return string.format("(((%s-%s)*%s)==0)", p, p, K(k))
+  end,
 }
 
--- Logical negations of the same identities, for decoy branches that
--- must NEVER be taken (see genAlwaysFalsePredicate below).
-local FALSE_IDENTITIES = {
-  "((V*V-V)%2==1)",
-  "(((V+1)*(V+1)-V*V-2*V-1)~=0)",
-  "(((V*V)%4)==2)",
-  "(((V-V)*(V+7))~=0)",
-  "((V*3-V*2-V)~=0)",
-  "(((V*V+V)%2)==1)",
-  "(((V*(V+1)*(V+2))%6)==1)",
-  "((V*V)<0)",
-  "((V~=V))",
+-- Negations of the same families, for decoy branches that must never run.
+local FALSE_FAMILIES = {
+  function(p)
+    local k = 2 * math.random(0, 49) + 1
+    return string.format("((%s*(%s+%s))%%2==1)", p, p, K(k))
+  end,
+  function(p)
+    local k = math.random(1, 99)
+    return string.format("(((%s+%s)*(%s+%s)-%s*(%s+%s))~=%s)", p, K(k), p, K(k), p, p, K(2 * k), K(k * k))
+  end,
+  function(p)
+    local k = math.random(2, 99)
+    return string.format("((%s*%s-%s*%s-%s)~=0)", K(k + 1), p, K(k), p, p)
+  end,
+  function(p)
+    local m = math.random(2, 999)
+    return string.format("((%s%%%s)>=%s)", p, K(m), K(m))
+  end,
+  function(p)
+    return string.format("((%s*%s)<0)", p, p)
+  end,
 }
 
+local function pick(list) return list[math.random(1, #list)] end
+
+-- Nested opaque predicate: `depth` identities joined with `and`, each one
+-- drawn fresh (families may repeat with different constants).
 local function genOpaquePredicate(probeName, depth)
-  local pool = {}
-  for i, v in ipairs(OPAQUE_IDENTITIES) do pool[i] = v end
   local chosen = {}
-  for _ = 1, depth do
-    local idx = math.random(1, #pool)
-    chosen[#chosen + 1] = (pool[idx]:gsub("V", probeName))
-    table.remove(pool, idx)
-  end
+  for i = 1, depth do chosen[i] = pick(TRUE_FAMILIES)(probeName) end
   local expr = chosen[#chosen]
   for i = #chosen - 1, 1, -1 do
     expr = "(" .. chosen[i] .. " and " .. expr .. ")"
@@ -61,16 +93,11 @@ local function genOpaquePredicate(probeName, depth)
   return expr
 end
 
--- A provably-never-true guard for decoy dispatch branches: the body
--- behind it is genuine, syntactically valid Lua that a static reader
--- has to spend time understanding, but it can never execute -- an
--- always-false identity ANDed with an always-true one (so it's not
--- trivially a single obviously-negated check sitting alone).
+-- A provably-never-true guard for decoy dispatch branches: an always-false
+-- identity ANDed with an always-true one.
 local function genAlwaysFalsePredicate(probeName)
-  local falseIdx = math.random(1, #FALSE_IDENTITIES)
-  local trueIdx = math.random(1, #OPAQUE_IDENTITIES)
-  local f = (FALSE_IDENTITIES[falseIdx]:gsub("V", probeName))
-  local t = (OPAQUE_IDENTITIES[trueIdx]:gsub("V", probeName))
+  local f = pick(FALSE_FAMILIES)(probeName)
+  local t = pick(TRUE_FAMILIES)(probeName)
   return "(" .. f .. " and " .. t .. ")"
 end
 
