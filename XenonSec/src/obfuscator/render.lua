@@ -18,6 +18,132 @@ local function numOr(v)
 end
 
 -- Handler self-test. Runs each simple handler against a synthetic frame with
+-- known inputs and folds what it leaves behind into one number. The build
+-- computes the expected total from the same operator semantics, so the code
+-- holds that single number and no per-check expected values to read.
+local DIGEST_P = 2147483647
+local BIN_EVAL = {
+  ["+"] = function(a, b) return a + b end,
+  ["-"] = function(a, b) return a - b end,
+  ["*"] = function(a, b) return a * b end,
+  ["/"] = function(a, b) return a / b end,
+  ["%"] = function(a, b) return a % b end,
+  ["^"] = function(a, b) return a ^ b end,
+  [".."] = function(a, b) return a .. b end,
+  ["=="] = function(a, b) return a == b end,
+  ["~="] = function(a, b) return a ~= b end,
+  ["<"] = function(a, b) return a < b end,
+  [">"] = function(a, b) return a > b end,
+  ["<="] = function(a, b) return a <= b end,
+  [">="] = function(a, b) return a >= b end,
+  ["//"] = function(a, b) return math.floor(a / b) end,
+}
+local UN_EVAL = {
+  ["-"] = function(a) return -a end,
+  ["not"] = function(a) return not a end,
+  ["#"] = function(a) return #a end,
+}
+-- Build-side mirror of the runtime fold (see vl in renderSelfTest).
+local function foldValue(x)
+  if type(x) == "number" then return x - x % 1 end
+  if type(x) == "string" then return #x + 100 end
+  if x == true then return 11 end
+  if x == false then return 12 end
+  return 13
+end
+
+local function renderSelfTest(ensureName, OPNUM, BINNUM, UNNUM, KV)
+  local _opcodes = load("opcodes")
+  local BINOP_SYMBOLS, UNOP_SYMBOLS = _opcodes.BINOP_SYMBOLS, _opcodes.UNOP_SYMBOLS
+  local H = ensureName("H")
+  local regsF, ipF = ensureName("regs"), ensureName("ip")
+  local x2, x3, x4, prF = ensureName("x2"), ensureName("x3"), ensureName("x4"), ensureName("pr")
+  local run, hc, brick = ensureName("hrun"), ensureName("hcheck"), ensureName("brick")
+  local fold, acc = ensureName("vl"), ensureName("acc")
+  local rN, ipN = ensureName("hr"), ensureName("hip")
+  local out = {}
+  out[#out + 1] = string.format("local function %s(num, a2, a3, a4, init)", run)
+  out[#out + 1] = string.format("  local f = { %s = {}, %s = a2, %s = a3, %s = a4, %s = 1, %s = 7 }",
+    regsF, x2, x3, x4, ipF, prF)
+  out[#out + 1] = string.format("  for i, v in pairs(init) do f.%s[i] = v end", regsF)
+  out[#out + 1] = string.format("  %s[num](f, nil)", H)
+  out[#out + 1] = string.format("  return f.%s, f.%s", regsF, ipF)
+  out[#out + 1] = "end"
+  out[#out + 1] = string.format("local function %s()", hc)
+  out[#out + 1] = string.format("  local function %s(x)", fold)
+  out[#out + 1] = '    if type(x) == "number" then return x - x % 1 end'
+  out[#out + 1] = '    if type(x) == "string" then return #x + 100 end'
+  out[#out + 1] = "    if x == true then return 11 end"
+  out[#out + 1] = "    if x == false then return 12 end"
+  out[#out + 1] = "    return 13"
+  out[#out + 1] = "  end"
+  local groups = {}
+  local expected = 0
+  local function enc(n) return numExpr(n) end
+  local function group(callStr, eR1, eR2, eIp)
+    local w1, w2, w3 = math.random(1, 97), math.random(1, 97), math.random(1, 97)
+    expected = expected + w1 * foldValue(eR1) + w2 * foldValue(eR2) + w3 * foldValue(eIp)
+    local term = " + " .. enc(w1) .. " * " .. fold .. "(" .. rN .. "[1]) + " .. enc(w2) .. " * " .. fold .. "(" .. rN .. "[2]) + " .. enc(w3) .. " * " .. fold .. "(" .. ipN .. ")"
+    groups[#groups + 1] = {
+      "    " .. rN .. ", " .. ipN .. " = " .. callStr,
+      "    " .. acc .. " = (" .. acc .. term .. ") % " .. enc(DIGEST_P),
+    }
+  end
+  local call = function(num, a2, a3, a4, init)
+    return string.format("%s(%s, %s, %s, %s, %s)", run, enc(num), a2, a3, a4, init or "{}")
+  end
+  group(call(OPNUM.LOADK, "1", numOr(KV.wm), "0"), _util.watermark(), nil, 2)
+  group(call(OPNUM.LOADTRUE, "1", "0", "0"), true, nil, 2)
+  group(call(OPNUM.LOADFALSE, "1", "0", "0"), false, nil, 2)
+  group(call(OPNUM.LOADNIL, "1", "2", "0", "{[1]=5,[2]=6}"), nil, nil, 2)
+  group(call(OPNUM.MOVE, "1", "2", "0", "{[2]=9}"), 9, 9, 2)
+  group(call(OPNUM.JMP, "40", "0", "0"), nil, nil, 40)
+  group(call(OPNUM.JF, "1", "40", "0", "{[1]=false}"), false, nil, 40)
+  group(call(OPNUM.JF, "1", "40", "0", "{[1]=0}"), 0, nil, 2)
+  group(call(OPNUM.JT, "1", "40", "0", "{[1]=0}"), 0, nil, 40)
+  group(call(OPNUM.JT, "1", "40", "0", "{[1]=false}"), false, nil, 2)
+  group(call(OPNUM.JNIL, "1", "40", "0", "{}"), nil, nil, 40)
+  group(call(OPNUM.JNIL, "1", "40", "0", "{[1]=false}"), false, nil, 2)
+  for k, sym in ipairs(BINOP_SYMBOLS) do
+    local r = BIN_EVAL[sym](7, 3)
+    group(call(OPNUM["BIN" .. k], "1", "2", "3", "{[2]=7,[3]=3}"), r, 7, 2)
+    group(call(OPNUM["BINK" .. k], "1", "2", numOr(KV.three), "{[2]=7}"), r, 7, 2)
+  end
+  for k, sym in ipairs(UNOP_SYMBOLS) do
+    local v = (sym == "#") and "abc" or 5
+    local vText = (sym == "#") and '"abc"' or "5"
+    group(call(OPNUM["UN" .. k], "1", "2", "0", "{[2]=" .. vText .. "}"), UN_EVAL[sym](v), v, 2)
+  end
+  out[#out + 1] = string.format("  local %s = 0", acc)
+  out[#out + 1] = string.format("  local %s, %s", rN, ipN)
+  for _, gi in ipairs(shuffledRange(#groups)) do
+    out[#out + 1] = groups[gi][1]
+    out[#out + 1] = groups[gi][2]
+  end
+  out[#out + 1] = string.format("    return %s == %s", acc, enc(math.floor(expected % DIGEST_P)))
+  out[#out + 1] = "end"
+  out[#out + 1] = string.format("if not %s() then %s() end", hc, brick)
+  return table.concat(out, "\n")
+end
+
+-- Renders the VM engine template: substitutes every %placeholder% with a per-build random identifier, opcode number or generated block.
+--------------------------------------------------------------------
+
+local dir = debug.getinfo(1, "S").source:match("@?(.*/)") or "./"
+local load = dofile(dir .. "loader.lua")
+local _handlers = load("handlers")
+local BINOP_TOKEN_NAMES, UNOP_TOKEN_NAMES, genDecoyHandlers, genOpHandlers = _handlers.BINOP_TOKEN_NAMES, _handlers.UNOP_TOKEN_NAMES, _handlers.genDecoyHandlers, _handlers.genOpHandlers
+local _predicates = load("predicates")
+local genOpaquePredicate = _predicates.genOpaquePredicate
+local _util = load("util")
+local randomIdent, substitute, shuffledRange = _util.randomIdent, _util.substitute, _util.shuffledRange
+local numExpr = _util.numExpr
+local function numOr(v)
+  if math.type(v) == "integer" then return numExpr(v) end
+  return tostring(v)
+end
+
+-- Handler self-test. Runs each simple handler against a synthetic frame with
 -- known inputs and checks the frame it leaves behind. Numbers are written as
 -- arithmetic, and the checks are emitted in a random order. Handlers that
 -- depend on scopes, calls or globals are not covered.
