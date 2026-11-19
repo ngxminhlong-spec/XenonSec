@@ -402,7 +402,7 @@ local function obfuscateOnce(source, chunkname, opts)
 
   -- Wrap the ENTIRE output (header locals: key/decode/consts/protos,
   -- plus the engine call) inside one outer closure, so the finished
-  -- file is a single `return (function(...) ... end)(...)` expression
+  -- file is a single `return setmetatable({Ms=...}, {}):Ms()(...)` expression
   -- -- nothing (opcode numbers, decode key, helper names, consts,
   -- protos) sits at the chunk's top level at all.
   -- Build-time hashes for the anti-debug code check (see ckDump in the header).
@@ -412,14 +412,9 @@ local function obfuscateOnce(source, chunkname, opts)
   local function luaQuote(str)
     return '"' .. str:gsub("[%c\"\\\128-\255]", function(c) return string.format("\\%03d", c:byte()) end) .. '"'
   end
-  -- The outer wrapper is written in one of several equivalent spellings,
-  -- chosen per build, so the file does not start with the same text every time.
-  local wrapForms = {
-    { "return (function(...)\n", "\nend)(...)\n" },
-    { "return(function(...)\n", "\nend)(...)\n" },
-    { "return (function( ... )\n", "\nend ) ( ... )\n" },
-  }
-  local wrapForm = wrapForms[math.random(1, #wrapForms)]
+  -- Outer wrapper in the Luraph style: the body is returned by the Ms method
+  -- of a table, so the file is one setmetatable(...):Ms()(...) expression.
+  local wrapForm = { "return setmetatable({Ms=function(self) return function(...)\n", "\nend end},{}):Ms()(...)\n" }
   local wrapHead, wrapTail = wrapForm[1], wrapForm[2]
   local ckHashes, dumpPrefix = { 0, 0, 0, 0 }, ""
   if opts.antiDebug and not useTypes and _VERSION == "Lua 5.3" then
