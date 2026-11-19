@@ -182,9 +182,18 @@ local function %run%(%mod%, ...)
       local %key% = (%ins%[1] - (%mk% + %K_M2%) % %K_MOD%) % %K_MOD%
       local %h% = %H%[%key%]
       if not %h% then error() end
-      %F%.%x2% = (%ins%[2] - (%mk% + 2 * %K_M2%) % %K_MOD%) % %K_MOD%
-      %F%.%x3% = (%ins%[3] - (%mk% + 3 * %K_M2%) % %K_MOD%) % %K_MOD%
-      %F%.%x4% = (%ins%[4] - (%mk% + 4 * %K_M2%) % %K_MOD%) % %K_MOD%
+      local %w2% = (%ins%[2] - (%mk% + 2 * %K_M2%) % %K_MOD%) % %K_MOD%
+      local %w3% = (%ins%[3] - (%mk% + 3 * %K_M2%) % %K_MOD%) % %K_MOD%
+      local %w4% = (%ins%[4] - (%mk% + 4 * %K_M2%) % %K_MOD%) % %K_MOD%
+      -- Undo this opcode's operand order (opPerm in the build): operand j is
+      -- the field named by %pq%[j]. Field values are numbers, never false.
+      local %pq% = %PERM%[%CANON%[%key%] or %key%]
+      local %ps% = %pq%[1]
+      %F%.%x2% = (%ps% == 1 and %w2%) or (%ps% == 2 and %w3%) or %w4%
+      %ps% = %pq%[2]
+      %F%.%x3% = (%ps% == 1 and %w2%) or (%ps% == 2 and %w3%) or %w4%
+      %ps% = %pq%[3]
+      %F%.%x4% = (%ps% == 1 and %w2%) or (%ps% == 2 and %w3%) or %w4%
       %F%.%st% = (%F%.%st% * %K_SA% + (%CANON%[%key%] or %key%) * %K_SB% + %K_SC%) % %K_MOD%
       %F%.%pr% = (%F%.%pr% + 1) % 65536
       %PERIODIC%

@@ -306,6 +306,18 @@ local function buildBundle(mod, opts)
     for _ = 1, aliasCount[name] do group[#group + 1] = freeKey() end
     opGroups[name] = group
   end
+  -- Per-build operand order: operand j of canonical opcode op is stored in
+  -- field opPerm[op][j] + 1 (fields 2..4). The dispatcher undoes it with the
+  -- same table, so the same handler reads different fields per opcode.
+  local opPerm = {}
+  for _, name in ipairs(OPCODES) do
+    local q = { 1, 2, 3 }
+    for i = 3, 2, -1 do
+      local j = math.random(1, i)
+      q[i], q[j] = q[j], q[i]
+    end
+    opPerm[OPNUM[name]] = q
+  end
   local BINNUM = {}
   for _, sym in ipairs(BINOP_SYMBOLS) do BINNUM[sym] = freeKey() end
   local UNNUM = {}
@@ -538,12 +550,16 @@ local function buildBundle(mod, opts)
       local seed = seedState % MOD
       local group = opGroups[instr.op]
       local opn = group[math.random(1, #group)]
-      local a = instr.a or 0
-      local b = instr.b or 0
-      local c = instr.c or 0
-      raw[#raw + 1] = packRecord({ opn, a, b, c })
-      local eop, ea = encodeField(opn, seed, 1, cur), encodeField(a, seed, 2, cur)
-      local eb, ec = encodeField(b, seed, 3, cur), encodeField(c, seed, 4, cur)
+      local ops = { instr.a or 0, instr.b or 0, instr.c or 0 }
+      -- Operand j lands in field opPerm[op][j] + 1 (fields 2..4).
+      local q = opPerm[OPNUM[instr.op]]
+      local f = {}
+      for j = 1, 3 do f[q[j]] = ops[j] end
+      raw[#raw + 1] = packRecord({ opn, f[1], f[2], f[3] })
+      local eop = encodeField(opn, seed, 1, cur)
+      local ea = encodeField(f[1], seed, 2, cur)
+      local eb = encodeField(f[2], seed, 3, cur)
+      local ec = encodeField(f[3], seed, 4, cur)
       -- Same order the runtime hashes decoded tuples: seed, op, a, b, c.
       ih = mixChecksum(ih, seed); ih = mixChecksum(ih, eop); ih = mixChecksum(ih, ea)
       ih = mixChecksum(ih, eb); ih = mixChecksum(ih, ec)
@@ -604,6 +620,7 @@ local function buildBundle(mod, opts)
     decMain = mod.decMain,
     OPNUM = OPNUM,
     opGroups = opGroups,
+    opPerm = opPerm,
     BINNUM = BINNUM,
     UNNUM = UNNUM,
     freeKey = freeKey,

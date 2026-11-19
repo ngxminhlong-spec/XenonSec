@@ -115,7 +115,8 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
   local function renderOpAliases()
     local groups = KV and KV.opGroups
     local CANON = ensureName("CANON")
-    if not groups then return "local " .. CANON .. " = {}" end
+    local PERM = ensureName("PERM")
+    if not groups then return "local " .. CANON .. " = {}\nlocal " .. PERM .. " = {}" end
     local H, RK = ensureName("H"), ensureName("RK")
     local names = {}
     for name in pairs(groups) do names[#names + 1] = name end
@@ -134,6 +135,11 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
         canonTbl[#canonTbl + 1] = string.format("[%s] = %s", numExpr(k), numExpr(g[1]))
       end
     end
+    -- Operand order per canonical opcode (see opPerm in bundle.lua).
+    local permTbl = {}
+    for cn, q in pairs(KV.opPerm or {}) do
+      permTbl[#permTbl + 1] = string.format("[%s] = {%s, %s, %s}", numExpr(cn), numExpr(q[1]), numExpr(q[2]), numExpr(q[3]))
+    end
     local resetList = {}
     for _, name in ipairs({ "JMP", "JF", "JT", "JNIL", "RET", "RETM" }) do
       if OPNUM[name] then resetList[#resetList + 1] = string.format("[%s] = true", numExpr(OPNUM[name])) end
@@ -145,6 +151,7 @@ local function renderTemplate(template, OPNUM, BINNUM, UNNUM, totalInstr, antiDe
     local seed = KV.rekeySeed or 1
     local rekeyFn = table.concat({
       "local " .. CANON .. " = { " .. table.concat(canonTbl, ", ") .. " }",
+      "local " .. PERM .. " = { " .. table.concat(permTbl, ", ") .. " }",
       "local " .. RK .. " = { g = {" .. table.concat(tbl, ", ") .. "}, s = " .. seed .. " }",
       RK .. ".rekey = function(pi)",
       "  local pp = " .. pr .. "[pi]",

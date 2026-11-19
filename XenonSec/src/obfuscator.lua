@@ -232,7 +232,7 @@ local function obfuscateOnce(source, chunkname, opts)
       wm = bundle.watermarkIdx, three = bundle.threeIdx,
       minifyFn = opts.minify and minifyTemplateText or nil, luauTypes = useTypes,
       scatterType = scatterType,
-      opGroups = bundle.opGroups, rekeySeed = math.random(1, 2147483646),
+      opGroups = bundle.opGroups, opPerm = bundle.opPerm, rekeySeed = math.random(1, 2147483646),
       shared = function(tok) return resolveShared(tok) end })
   -- Hash constants used by the engine's own checksum functions, masked the
   -- same way as the header's.
