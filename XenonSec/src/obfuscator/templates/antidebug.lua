@@ -8,7 +8,7 @@
 return [===[
 -- Captured at load, before any program code runs. The checks compare against
 -- these values, not against whatever the globals hold later.
-local %pcallC% = pcall
+local %pcallC% = %base%[__XS_KS_pcall__]
 -- Builtins the hash check uses, captured here so a program that rebinds a
 -- global (type, string, ...) cannot make the check throw. %byte% above is the
 -- captured string.byte.
@@ -21,12 +21,12 @@ local %coRunFn% = nil
 -- and no decoding.
 local %NM% = {}
 if __XS_ANTIDEBUG__ then
-  %NM%.debug = %dname%(__XS_NM_DEBUG__)
+  %NM%[__XS_KS_debug__] = %dname%(__XS_NM_DEBUG__)
   %NM%.gethook = %dname%(__XS_NM_GETHOOK__)
   %NM%.getinfo = %dname%(__XS_NM_GETINFO__)
   %NM%.coroutine = %dname%(__XS_NM_COROUTINE__)
   %NM%.running = %dname%(__XS_NM_RUNNING__)
-  local %dok%, %dlib% = %pcallC%(function() return %base%[%NM%.debug] end)
+  local %dok%, %dlib% = %pcallC%(function() return %base%[%NM%[__XS_KS_debug__]] end)
   if %dok% and %dlib% then
     local %gok%, %gfn% = %pcallC%(function() return %dlib%[%NM%.gethook] end)
     local %iok%, %ifn% = %pcallC%(function() return %dlib%[%NM%.getinfo] end)
@@ -39,8 +39,8 @@ if __XS_ANTIDEBUG__ then
 end
 
 -- Each check returns a number: 0 when it sees nothing, nonzero when it does.
--- Nothing branches on a check's outcome. The result is summed into %adMix%
--- and the key is derived from it, so removing one check's effect changes the
+-- Nothing branches on a check's outcome. The result is summed into the key
+-- accumulators (see %adAdd%) and the keys are derived from them, so removing one check's effect changes the
 -- decoded values, not just one flag. Each check takes its inputs as a table,
 -- so the same code runs on the live environment and on the mocks below.
 -- 1: a debug hook is set on the main thread.
@@ -87,7 +87,7 @@ local %realEnv% = function()
   local %e% = %RE%
   %e%.hook = %hookFn%; %e%.coRun = %coRunFn%; %e%.info = %infoFn%; %e%.dbg = %dbgLib%
   if %dbgLib% then
-    %e%.liveDbg = %base%[%NM%.debug]
+    %e%.liveDbg = %base%[%NM%[__XS_KS_debug__]]
     %e%.liveHook = %dbgLib%[%NM%.gethook]
     %e%.liveInfo = %dbgLib%[%NM%.getinfo]
   else
@@ -135,7 +135,7 @@ end
 -- platform does not start with %DPFX%, so the test is skipped there.
 local %CKH% = { __XS_CKH__ }
 local %DPFX% = __XS_DPFX__
-local %sdump% = string and string.dump
+local %sdump% = %base%[__XS_KS_string__] and %base%[__XS_KS_string__][__XS_KS_dump__]
 local function %ckDump%(%f%)
   if not %sdump% then return nil end
   local %ok%, %s% = %pcallC%(%sdump%, %f%, true)
@@ -144,34 +144,52 @@ local function %ckDump%(%f%)
     if %byte%(%s%, %j%) ~= %byte%(%DPFX%, %j%) then return nil end
   end
   local %h% = 5381
-  for %j% = 1, #%s% do %h% = (%h% * 31 + %byte%(%s%, %j%)) % 2147483647 end
+  for %j% = 1, #%s% do %h% = (%h% * __XS_H31__ + %byte%(%s%, %j%)) % __XS_MH__ end
   return %h%
+end
+
+-- Each result goes to all three key families (see the header): the static
+-- constants and checksum (%adMix%), the protos (%adMixP%, weighted 3) and the
+-- per-site constants (%adMixS%, weighted 5). Only the boot pass (boot = true)
+-- adds the check's build-time token, so every family needs every check to
+-- have run once before its key can be derived. Later random runs add only
+-- their detection result, which is zero on a clean run.
+local function %adAdd%(%d%)
+  %adMix% = %adMix% + %d%
+  %adMixP% = %adMixP% + %d% * 3
+  %adMixS% = %adMixS% + %d% * 5
 end
 
 -- Index 1-4: run a check on the live inputs. Index 5: the known-answer
 -- self-test. Index 11-14: the code hash of check 1-4 (kept off the decoders'
 -- path, since hashing is much more work than a live check). A disagreement
 -- adds to the state.
-%adStep% = function(%si%)
+%adStep% = function(%si%, %boot%)
   if not __XS_ANTIDEBUG__ then return end
+  local %tok% = 0
+  if %boot% then %tok% = __XS_ADTOKS__[%si%] end
   if %si% > 10 then
     local %k% = %si% - 10
     local %want% = %CKH%[%k%]
+    local %d% = 0
     if %want% and %want% ~= 0 then
       local %got% = %ckDump%(%CKS%[%k%])
-      if %got% and %got% ~= %want% then %adMix% = %adMix% + 113 end
+      if %got% and %got% ~= %want% then %d% = 113 end
     end
+    %adAdd%(%d% + %tok%)
     return
   end
   if %si% == 5 then
-    %adMix% = %adMix% + %selfTest%() * 127
+    %adAdd%(%selfTest%() * 127 + %tok%)
     return
   end
-  %adMix% = %adMix% + %CKS%[%si%](%realEnv%())
+  %adAdd%(%CKS%[%si%](%realEnv%()) + %tok%)
 end
 if __XS_ANTIDEBUG__ then
-  for %sk% = 1, 5 do %adStep%(%sk%) end
-  for %sk% = 11, 14 do %adStep%(%sk%) end
+  for %sk% = 1, 5 do %adStep%(%sk%, true) end
+  for %sk% = 11, 14 do %adStep%(%sk%, true) end
+  -- Starts every decode-state chain (see chainInit in bundle.lua).
+  %bootSt% = (%adMix% * __XS_FSA__) % __XS_FMOD__
 end
 
 ]===]
